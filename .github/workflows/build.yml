@@ -8,6 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download font
+        run: |
+          mkdir -p src/main/resources/assets/lowspec/font
+          curl -fsSL -o src/main/resources/assets/lowspec/font/poppins.ttf \
+            https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Medium.ttf
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
