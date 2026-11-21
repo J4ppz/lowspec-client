@@ -4,12 +4,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Properties;
-import java.util.function.BooleanSupplier;
-import java.util.function.Consumer;
 
 import com.mojang.blaze3d.platform.InputConstants;
 
@@ -34,10 +30,20 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.FontDescription;
 import net.minecraft.network.chat.Style;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
 
 public class LowSpecClient implements ClientModInitializer {
 
     private static KeyMapping menuKey;
+    private static KeyMapping zoomKey;
+
+    // zoom + sprint state
+    private static boolean zoomActive;
+    private static int zoomBase;
+    private static float zoomCur;
+    private static boolean sprintForced;
 
     @Override
     public void onInitializeClient() {
@@ -46,15 +52,16 @@ public class LowSpecClient implements ClientModInitializer {
         KeyMapping.Category category = KeyMapping.Category.register(
                 Identifier.fromNamespaceAndPath("lowspec", "main"));
         menuKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-                "key.lowspec.menu",
-                InputConstants.Type.KEYSYM,
-                InputConstants.KEY_RSHIFT,
-                category));
+                "key.lowspec.menu", InputConstants.Type.KEYSYM, InputConstants.KEY_RSHIFT, category));
+        zoomKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+                "key.lowspec.zoom", InputConstants.Type.KEYSYM, InputConstants.KEY_C, category));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (menuKey.consumeClick()) {
                 client.setScreenAndShow(new MenuScreen());
             }
+            tickSprint(client);
+            tickZoom(client);
         });
 
         HudElementRegistry.attachElementBefore(
@@ -71,9 +78,72 @@ public class LowSpecClient implements ClientModInitializer {
         });
     }
 
+    // ---------- Toggle sprint ----------
+    private static void tickSprint(Minecraft mc) {
+        if (mc.player == null) return;
+        boolean forward = mc.options.keyUp.isDown();
+        if (Settings.has(Mod.SPRINT) && forward && !mc.player.isUsingItem()) {
+            mc.options.keySprint.setDown(true);
+            sprintForced = true;
+        } else if (sprintForced) {
+            mc.options.keySprint.setDown(false);
+            sprintForced = false;
+        }
+    }
+
+    // ---------- Smooth zoom ----------
+    private static void tickZoom(Minecraft mc) {
+        var fov = mc.options.fov();
+        boolean want = Settings.has(Mod.ZOOM) && zoomKey.isDown();
+        if (want) {
+            if (!zoomActive) {
+                zoomActive = true;
+                zoomBase = fov.get();
+                zoomCur = zoomBase;
+            }
+            zoomCur += (30f - zoomCur) * 0.4f;
+            fov.set(Math.round(zoomCur));
+        } else if (zoomActive) {
+            zoomCur += (zoomBase - zoomCur) * 0.4f;
+            if (Math.abs(zoomBase - zoomCur) < 0.8f) {
+                fov.set(zoomBase);
+                zoomActive = false;
+            } else {
+                fov.set(Math.round(zoomCur));
+            }
+        }
+    }
+
+    // ---------- Modules ----------
+    enum Mod {
+        FPS("FPS counter", true),
+        CPS("CPS counter", true),
+        COORDS("Coordinates", false),
+        MEMORY("Memory usage", false),
+        KEYS("Keystrokes", true),
+        ARMOR("Armor HUD", true),
+        EFFECTS("Effect timer", true),
+        SPRINT("Toggle sprint", false),
+        ZOOM("Zoom (hold C)", true),
+        FONT("Smooth font", false),
+        PERF("Performance mode", false);
+
+        final String label;
+        final boolean def;
+
+        Mod(String label, boolean def) {
+            this.label = label;
+            this.def = def;
+        }
+    }
+
     // ---------- Settings (saved to config/lowspec.properties) ----------
     static final class Settings {
-        static boolean fps = true, cps = true, keys = true, perf = false;
+        private static final boolean[] ON = new boolean[Mod.values().length];
+
+        static {
+            for (Mod m : Mod.values()) ON[m.ordinal()] = m.def;
+        }
 
         static int prevRender = 12, prevSim = 12, prevBlend = 2;
         static boolean prevShadows = true;
@@ -82,6 +152,14 @@ public class LowSpecClient implements ClientModInitializer {
         private static final Path FILE =
                 FabricLoader.getInstance().getConfigDir().resolve("lowspec.properties");
 
+        static boolean has(Mod m) {
+            return ON[m.ordinal()];
+        }
+
+        static void put(Mod m, boolean v) {
+            ON[m.ordinal()] = v;
+        }
+
         static void load() {
             try {
                 if (!Files.exists(FILE)) return;
@@ -89,10 +167,10 @@ public class LowSpecClient implements ClientModInitializer {
                 try (var in = Files.newInputStream(FILE)) {
                     p.load(in);
                 }
-                fps = Boolean.parseBoolean(p.getProperty("fps", "true"));
-                cps = Boolean.parseBoolean(p.getProperty("cps", "true"));
-                keys = Boolean.parseBoolean(p.getProperty("keys", "true"));
-                perf = Boolean.parseBoolean(p.getProperty("perf", "false"));
+                for (Mod m : Mod.values()) {
+                    ON[m.ordinal()] = Boolean.parseBoolean(
+                            p.getProperty("mod." + m.name(), Boolean.toString(m.def)));
+                }
                 prevRender = Integer.parseInt(p.getProperty("prevRender", "12"));
                 prevSim = Integer.parseInt(p.getProperty("prevSim", "12"));
                 prevBlend = Integer.parseInt(p.getProperty("prevBlend", "2"));
@@ -105,10 +183,9 @@ public class LowSpecClient implements ClientModInitializer {
         static void save() {
             try {
                 Properties p = new Properties();
-                p.setProperty("fps", Boolean.toString(fps));
-                p.setProperty("cps", Boolean.toString(cps));
-                p.setProperty("keys", Boolean.toString(keys));
-                p.setProperty("perf", Boolean.toString(perf));
+                for (Mod m : Mod.values()) {
+                    p.setProperty("mod." + m.name(), Boolean.toString(ON[m.ordinal()]));
+                }
                 p.setProperty("prevRender", Integer.toString(prevRender));
                 p.setProperty("prevSim", Integer.toString(prevSim));
                 p.setProperty("prevBlend", Integer.toString(prevBlend));
@@ -124,9 +201,10 @@ public class LowSpecClient implements ClientModInitializer {
 
     // ---------- Performance mode ----------
     static final class Perf {
-        static void set(boolean on) {
+        static void set(boolean enable) {
             var o = Minecraft.getInstance().options;
-            if (on && !Settings.perf) {
+            boolean current = Settings.has(Mod.PERF);
+            if (enable && !current) {
                 Settings.prevRender = o.renderDistance().get();
                 Settings.prevSim = o.simulationDistance().get();
                 Settings.prevBlend = o.biomeBlendRadius().get();
@@ -139,7 +217,7 @@ public class LowSpecClient implements ClientModInitializer {
                 o.entityShadows().set(false);
                 o.entityDistanceScaling().set(0.5);
                 o.save();
-            } else if (!on && Settings.perf) {
+            } else if (!enable && current) {
                 o.renderDistance().set(Settings.prevRender);
                 o.simulationDistance().set(Settings.prevSim);
                 o.biomeBlendRadius().set(Settings.prevBlend);
@@ -147,36 +225,38 @@ public class LowSpecClient implements ClientModInitializer {
                 o.entityDistanceScaling().set(Settings.prevEntity);
                 o.save();
             }
-            Settings.perf = on;
+            Settings.put(Mod.PERF, enable);
         }
     }
 
-    // ---------- Glass drawing helpers ----------
+    // ---------- Drawing helpers (kept cheap: few fills) ----------
     static final class Ui {
         static final Style STYLE = Style.EMPTY.withFont(
                 new FontDescription.Resource(Identifier.fromNamespaceAndPath("lowspec", "glass")));
-        private static final HashMap<String, Component> CACHE = new HashMap<>();
+        private static final HashMap<String, Component> PLAIN = new HashMap<>();
+        private static final HashMap<String, Component> STYLED = new HashMap<>();
 
         static Component t(String s) {
-            if (CACHE.size() > 512) CACHE.clear();
-            return CACHE.computeIfAbsent(s, k -> Component.literal(k).withStyle(STYLE));
+            boolean styled = Settings.has(Mod.FONT);
+            HashMap<String, Component> map = styled ? STYLED : PLAIN;
+            if (map.size() > 512) map.clear();
+            return map.computeIfAbsent(s,
+                    k -> styled ? Component.literal(k).withStyle(STYLE) : Component.literal(k));
         }
 
         static int tw(Font f, String s) {
             return f.width(t(s));
         }
 
-        static void text(GuiGraphicsExtractor g, Font f, String s, int x, int y, int color) {
-            g.text(f, t(s), x, y, color, false);
+        static void text(GuiGraphicsExtractor g, Font f, String s, int x, int y, int color, boolean shadow) {
+            g.text(f, t(s), x, y, color, shadow);
         }
 
-        /** Multiply a color's alpha by m (0..1). */
         static int a(int c, float m) {
             int al = Math.round(((c >>> 24) & 0xFF) * Math.max(0f, Math.min(1f, m)));
             return (al << 24) | (c & 0xFFFFFF);
         }
 
-        /** Blend two ARGB colors. */
         static int mix(int c1, int c2, float t) {
             t = Math.max(0f, Math.min(1f, t));
             int r = 0;
@@ -187,21 +267,24 @@ public class LowSpecClient implements ClientModInitializer {
             return r;
         }
 
-        /** Filled rectangle with rounded corners (radius ~3). */
-        static void round(GuiGraphicsExtractor g, int x, int y, int w, int h, int c) {
-            g.fill(x + 3, y, x + w - 3, y + 1, c);
-            g.fill(x + 1, y + 1, x + w - 1, y + 3, c);
-            g.fill(x, y + 3, x + w, y + h - 3, c);
-            g.fill(x + 1, y + h - 3, x + w - 1, y + h - 1, c);
-            g.fill(x + 3, y + h - 1, x + w - 3, y + h, c);
+        /** Rectangle with 1px rounded corners, only 3 fills, no overlap. */
+        static void rr(GuiGraphicsExtractor g, int x, int y, int w, int h, int c) {
+            g.fill(x + 1, y, x + w - 1, y + 1, c);
+            g.fill(x, y + 1, x + w, y + h - 1, c);
+            g.fill(x + 1, y + h - 1, x + w - 1, y + h, c);
         }
 
-        /** Frosted glass panel: shadow, tint, bright rim, soft top gloss. */
+        /** Lunar-style HUD panel: dark translucent box + thin light rim on top. */
+        static void panel(GuiGraphicsExtractor g, int x, int y, int w, int h) {
+            rr(g, x, y, w, h, 0x70101820);
+            g.fill(x + 2, y, x + w - 2, y + 1, 0x55FFFFFF);
+        }
+
+        /** Richer frosted look, used only on static screens (menu / title / inventory). */
         static void glass(GuiGraphicsExtractor g, int x, int y, int w, int h, float m) {
-            round(g, x + 1, y + 2, w, h, a(0x30000000, m));
-            round(g, x, y, w, h, a(0x5A0D1B2A, m));
+            rr(g, x + 1, y + 2, w, h, a(0x30000000, m));
+            rr(g, x, y, w, h, a(0x700D1B2A, m));
             g.fill(x + 3, y, x + w - 3, y + 1, a(0x99FFFFFF, m));
-            g.fill(x + 3, y + h - 1, x + w - 3, y + h, a(0x33FFFFFF, m));
             g.fill(x, y + 3, x + 1, y + h - 3, a(0x55FFFFFF, m));
             g.fill(x + w - 1, y + 3, x + w, y + h - 3, a(0x55FFFFFF, m));
             g.fill(x + 2, y + 1, x + w - 2, y + 1 + Math.max(2, h / 3), a(0x14FFFFFF, m));
@@ -232,58 +315,50 @@ public class LowSpecClient implements ClientModInitializer {
         }
     }
 
-    // ---------- Right Shift menu (glass) ----------
+    // ---------- Right Shift menu ----------
     static final class MenuScreen extends Screen {
-        private static final class Toggle {
-            final String name;
-            final BooleanSupplier get;
-            final Consumer<Boolean> set;
-            float on, hover;
-            int y;
-
-            Toggle(String name, BooleanSupplier get, Consumer<Boolean> set) {
-                this.name = name;
-                this.get = get;
-                this.set = set;
-            }
-        }
-
-        private final List<Toggle> toggles = new ArrayList<>();
+        private static final Mod[] MODS = Mod.values();
+        private final float[] on = new float[MODS.length];
+        private final float[] hover = new float[MODS.length];
         private float doneHover;
         private long openNs, lastNs;
-        private int px, py, pw, ph, doneY;
+        private int px, py, pw, ph, cw, doneY;
 
         MenuScreen() {
             super(Component.literal("LowSpec Client"));
         }
 
+        private int cellX(int i) {
+            return px + 10 + (i % 2) * (cw + 10);
+        }
+
+        private int cellY(int i) {
+            return py + 40 + (i / 2) * 26;
+        }
+
         @Override
         protected void init() {
-            toggles.clear();
-            toggles.add(new Toggle("FPS counter", () -> Settings.fps, v -> Settings.fps = v));
-            toggles.add(new Toggle("CPS counter", () -> Settings.cps, v -> Settings.cps = v));
-            toggles.add(new Toggle("Keystrokes", () -> Settings.keys, v -> Settings.keys = v));
-            toggles.add(new Toggle("Performance mode", () -> Settings.perf, Perf::set));
-            for (Toggle t : toggles) t.on = t.get.getAsBoolean() ? 1f : 0f;
-
-            pw = 230;
-            ph = 40 + toggles.size() * 26 + 34;
+            pw = 300;
+            cw = (pw - 30) / 2;
+            int rows = (MODS.length + 1) / 2;
+            ph = 40 + rows * 26 + 34;
             px = (this.width - pw) / 2;
-            py = (this.height - ph) / 2;
+            py = Math.max(2, (this.height - ph) / 2);
 
-            // Invisible vanilla buttons: they only provide the click handling.
-            // All drawing is done in extractRenderState below.
-            for (int i = 0; i < toggles.size(); i++) {
-                Toggle t = toggles.get(i);
-                t.y = py + 40 + i * 26;
+            // Invisible vanilla buttons: they only handle clicks. Drawing is custom below.
+            for (int i = 0; i < MODS.length; i++) {
+                Mod mod = MODS[i];
+                on[i] = Settings.has(mod) ? 1f : 0f;
                 this.addRenderableWidget(Button.builder(Component.empty(), b -> {
-                    t.set.accept(!t.get.getAsBoolean());
+                    boolean now = !Settings.has(mod);
+                    if (mod == Mod.PERF) Perf.set(now);
+                    else Settings.put(mod, now);
                     Settings.save();
-                }).bounds(px + 12, t.y, pw - 24, 22).build());
+                }).bounds(cellX(i), cellY(i), cw, 22).build());
             }
-            doneY = py + 40 + toggles.size() * 26 + 4;
+            doneY = py + 40 + rows * 26 + 4;
             this.addRenderableWidget(Button.builder(Component.empty(), b -> this.onClose())
-                    .bounds(px + 12, doneY, pw - 24, 22).build());
+                    .bounds(px + 10, doneY, pw - 20, 22).build());
 
             openNs = lastNs = System.nanoTime();
         }
@@ -303,46 +378,50 @@ public class LowSpecClient implements ClientModInitializer {
             Ui.glass(g, px, py + oy, pw, ph, e);
 
             Logo.draw(g, px + 12, py + oy + 8, 2, e);
-            Ui.text(g, f, "LowSpec Client", px + 12 + 30, py + oy + 16, Ui.a(0xFFFFFFFF, e));
+            Ui.text(g, f, "LowSpec Client", px + 12 + 30, py + oy + 16, Ui.a(0xFFFFFFFF, e), false);
 
-            for (Toggle t : toggles) {
-                boolean hov = mx >= px + 12 && mx < px + pw - 12 && my >= t.y && my < t.y + 22;
-                t.hover += ((hov ? 1f : 0f) - t.hover) * k;
-                t.on += ((t.get.getAsBoolean() ? 1f : 0f) - t.on) * k;
+            for (int i = 0; i < MODS.length; i++) {
+                int x = cellX(i), y = cellY(i) + oy;
+                boolean hov = mx >= x && mx < x + cw && my >= cellY(i) && my < cellY(i) + 22;
+                hover[i] += ((hov ? 1f : 0f) - hover[i]) * k;
+                on[i] += ((Settings.has(MODS[i]) ? 1f : 0f) - on[i]) * k;
 
-                int ry = t.y + oy;
-                Ui.round(g, px + 12, ry, pw - 24, 22, Ui.a(Ui.mix(0x30FFFFFF, 0x55FFFFFF, t.hover), e));
-                Ui.text(g, f, t.name, px + 22, ry + 7, Ui.a(0xFFFFFFFF, e));
+                Ui.rr(g, x, y, cw, 22, Ui.a(Ui.mix(0x30FFFFFF, 0x55FFFFFF, hover[i]), e));
+                Ui.text(g, f, MODS[i].label, x + 8, y + 7, Ui.a(0xFFFFFFFF, e), false);
 
-                int sx = px + pw - 12 - 10 - 28;
-                int sy = ry + 5;
-                Ui.round(g, sx, sy, 28, 12, Ui.a(Ui.mix(0x66FFFFFF, 0xFF55FFAA, t.on), e));
-                Ui.round(g, sx + 2 + (int) (t.on * 16), sy + 2, 8, 8, Ui.a(0xFFFFFFFF, e));
+                int sx = x + cw - 24 - 8;
+                int sy = y + 5;
+                Ui.rr(g, sx, sy, 24, 12, Ui.a(Ui.mix(0x66FFFFFF, 0xFF55FFAA, on[i]), e));
+                Ui.rr(g, sx + 2 + (int) (on[i] * 12), sy + 2, 8, 8, Ui.a(0xFFFFFFFF, e));
             }
 
-            boolean dh = mx >= px + 12 && mx < px + pw - 12 && my >= doneY && my < doneY + 22;
+            boolean dh = mx >= px + 10 && mx < px + pw - 10 && my >= doneY && my < doneY + 22;
             doneHover += ((dh ? 1f : 0f) - doneHover) * k;
-            Ui.round(g, px + 12, doneY + oy, pw - 24, 22, Ui.a(Ui.mix(0x44FFFFFF, 0x99FFFFFF, doneHover), e));
+            Ui.rr(g, px + 10, doneY + oy, pw - 20, 22, Ui.a(Ui.mix(0x44FFFFFF, 0x99FFFFFF, doneHover), e));
             int dw = Ui.tw(f, "Done");
-            Ui.text(g, f, "Done", px + pw / 2 - dw / 2, doneY + oy + 7, Ui.a(0xFFFFFFFF, e));
+            Ui.text(g, f, "Done", px + pw / 2 - dw / 2, doneY + oy + 7, Ui.a(0xFFFFFFFF, e), false);
         }
     }
 
-    // ---------- HUD (glass) ----------
+    // ---------- HUD ----------
     static final class Hud {
-        private static final int X = 6, Y = 6, KEY = 20, GAP = 3;
+        private static final int X = 6, Y = 6, KEY = 18, GAP = 2;
+        private static final EquipmentSlot[] SLOTS = {
+                EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET};
 
         private static final ArrayDeque<Long> leftClicks = new ArrayDeque<>();
         private static final ArrayDeque<Long> rightClicks = new ArrayDeque<>();
         private static boolean leftWas, rightWas;
-
         private static final float[] anim = new float[7]; // W A S D LMB RMB SPACE
 
         private static float deltaSum;
         private static int deltaCount;
         private static int shownFps;
-        private static long fpsWindowStart = System.nanoTime();
+        private static String fpsText = "FPS  --";
+        private static String memText = "MEM  --";
+        private static long windowStart = System.nanoTime();
         private static long lastNs = System.nanoTime();
+        private static final String[] LINES = new String[4];
 
         static void extract(GuiGraphicsExtractor g, DeltaTracker delta) {
             Minecraft mc = Minecraft.getInstance();
@@ -353,14 +432,17 @@ public class LowSpecClient implements ClientModInitializer {
             lastNs = now;
             float k = 1f - (float) Math.exp(-dt * 18f);
 
-            // FPS from the real time between frames (20 ticks = 1 second)
+            // FPS from the real time between frames; memory text refreshed with it
             deltaSum += delta.getRealtimeDeltaTicks();
             deltaCount++;
-            if (now - fpsWindowStart >= 500_000_000L) {
+            if (now - windowStart >= 500_000_000L) {
                 if (deltaSum > 0) shownFps = Math.round(20f * deltaCount / deltaSum);
+                fpsText = "FPS  " + shownFps;
+                Runtime rt = Runtime.getRuntime();
+                memText = "MEM  " + ((rt.totalMemory() - rt.freeMemory()) >> 20) + " / " + (rt.maxMemory() >> 20) + " MB";
                 deltaSum = 0;
                 deltaCount = 0;
-                fpsWindowStart = now;
+                windowStart = now;
             }
 
             boolean left = mc.options.keyAttack.isDown();
@@ -370,48 +452,99 @@ public class LowSpecClient implements ClientModInitializer {
             leftWas = left;
             rightWas = right;
 
-            boolean[] d = {
-                    mc.options.keyUp.isDown(), mc.options.keyLeft.isDown(),
-                    mc.options.keyDown.isDown(), mc.options.keyRight.isDown(),
-                    left, right, mc.options.keyJump.isDown()};
-            for (int i = 0; i < anim.length; i++) {
-                anim[i] += ((d[i] ? 1f : 0f) - anim[i]) * k;
-            }
+            int W = mc.getWindow().getGuiScaledWidth();
+            int H = mc.getWindow().getGuiScaledHeight();
 
+            // ----- info panel (FPS / CPS / coords / memory) -----
             int y = Y;
-            if (Settings.fps || Settings.cps) {
-                String l1 = "FPS  " + shownFps;
-                String l2 = "CPS  " + leftClicks.size() + " | " + rightClicks.size();
-                int lines = (Settings.fps ? 1 : 0) + (Settings.cps ? 1 : 0);
-                int w = Math.max(Settings.fps ? Ui.tw(font, l1) : 0, Settings.cps ? Ui.tw(font, l2) : 0) + 16;
-                int h = lines * 12 + 6;
-                Ui.glass(g, X, y, w, h, 1f);
-                int ty = y + 5;
-                if (Settings.fps) {
-                    Ui.text(g, font, l1, X + 8, ty, 0xFFFFFFFF);
-                    ty += 12;
-                }
-                if (Settings.cps) {
-                    Ui.text(g, font, l2, X + 8, ty, 0xFFFFFFFF);
-                }
-                y += h + 5;
+            int n = 0;
+            if (Settings.has(Mod.FPS)) LINES[n++] = fpsText;
+            if (Settings.has(Mod.CPS)) LINES[n++] = "CPS  " + leftClicks.size() + " | " + rightClicks.size();
+            if (Settings.has(Mod.COORDS) && mc.player != null) {
+                LINES[n++] = "XYZ  " + (int) Math.floor(mc.player.getX()) + "  "
+                        + (int) Math.floor(mc.player.getY()) + "  " + (int) Math.floor(mc.player.getZ());
             }
-            if (!Settings.keys) return;
+            if (Settings.has(Mod.MEMORY)) LINES[n++] = memText;
+            if (n > 0) {
+                int w = 0;
+                for (int i = 0; i < n; i++) w = Math.max(w, Ui.tw(font, LINES[i]));
+                w += 14;
+                int h = n * 11 + 6;
+                Ui.panel(g, X, y, w, h);
+                int ty = y + 4;
+                for (int i = 0; i < n; i++) {
+                    Ui.text(g, font, LINES[i], X + 7, ty, 0xFFFFFFFF, false);
+                    ty += 11;
+                }
+                y += h + 4;
+            }
 
-            int row2 = y + KEY + GAP;
-            key(g, font, "W", X + KEY + GAP, y, KEY, anim[0]);
-            key(g, font, "A", X, row2, KEY, anim[1]);
-            key(g, font, "S", X + KEY + GAP, row2, KEY, anim[2]);
-            key(g, font, "D", X + 2 * (KEY + GAP), row2, KEY, anim[3]);
+            // ----- keystrokes -----
+            if (Settings.has(Mod.KEYS)) {
+                boolean[] d = {
+                        mc.options.keyUp.isDown(), mc.options.keyLeft.isDown(),
+                        mc.options.keyDown.isDown(), mc.options.keyRight.isDown(),
+                        left, right, mc.options.keyJump.isDown()};
+                for (int i = 0; i < anim.length; i++) {
+                    anim[i] += ((d[i] ? 1f : 0f) - anim[i]) * k;
+                }
+                int row2 = y + KEY + GAP;
+                key(g, font, "W", X + KEY + GAP, y, KEY, anim[0]);
+                key(g, font, "A", X, row2, KEY, anim[1]);
+                key(g, font, "S", X + KEY + GAP, row2, KEY, anim[2]);
+                key(g, font, "D", X + 2 * (KEY + GAP), row2, KEY, anim[3]);
+                int row3 = row2 + KEY + GAP;
+                int total = 3 * KEY + 2 * GAP;
+                int half = (total - GAP) / 2;
+                key(g, font, "LMB", X, row3, half, anim[4]);
+                key(g, font, "RMB", X + half + GAP, row3, total - half - GAP, anim[5]);
+                key(g, font, "SPACE", X, row3 + KEY + GAP, total, anim[6]);
+            }
 
-            int row3 = row2 + KEY + GAP;
-            int total = 3 * KEY + 2 * GAP;
-            int half = (total - GAP) / 2;
-            key(g, font, "LMB", X, row3, half, anim[4]);
-            key(g, font, "RMB", X + half + GAP, row3, total - half - GAP, anim[5]);
+            if (mc.player == null) return;
 
-            int row4 = row3 + KEY + GAP;
-            key(g, font, "SPACE", X, row4, total, anim[6]);
+            // ----- armor HUD (right side) -----
+            if (Settings.has(Mod.ARMOR)) {
+                int ax = W - 22;
+                int ay = H / 2 - 38;
+                for (EquipmentSlot slot : SLOTS) {
+                    ItemStack s = mc.player.getItemBySlot(slot);
+                    if (!s.isEmpty()) {
+                        g.item(s, ax, ay);
+                        if (s.isDamageableItem()) {
+                            int max = s.getMaxDamage();
+                            int pct = (max - s.getDamageValue()) * 100 / max;
+                            String t = pct + "%";
+                            int col = pct > 60 ? 0xFF55FF55 : pct > 35 ? 0xFFFFFF55 : 0xFFFF5555;
+                            Ui.text(g, font, t, ax - 3 - Ui.tw(font, t), ay + 4, col, true);
+                        }
+                    }
+                    ay += 18;
+                }
+            }
+
+            // ----- effect timer (top right, under the vanilla effect icons) -----
+            if (Settings.has(Mod.EFFECTS)) {
+                int ey = 60;
+                for (MobEffectInstance e : mc.player.getActiveEffects()) {
+                    String name = e.getEffect().value().getDisplayName().getString();
+                    if (e.getAmplifier() > 0) name += " " + (e.getAmplifier() + 1);
+                    boolean inf = e.isInfiniteDuration();
+                    String line = name + "  " + (inf ? "inf" : fmt(e.getDuration()));
+                    int col = (!inf && e.getDuration() < 200) ? 0xFFFF6B6B : 0xFFFFFFFF;
+                    int w = Ui.tw(font, line) + 12;
+                    int ex = W - w - X;
+                    Ui.panel(g, ex, ey, w, 15);
+                    Ui.text(g, font, line, ex + 6, ey + 3, col, false);
+                    ey += 18;
+                }
+            }
+        }
+
+        private static String fmt(int ticks) {
+            int s = Math.max(0, ticks) / 20;
+            int sec = s % 60;
+            return (s / 60) + ":" + (sec < 10 ? "0" : "") + sec;
         }
 
         private static void track(ArrayDeque<Long> clicks, boolean down, boolean was, long now) {
@@ -421,11 +554,10 @@ public class LowSpecClient implements ClientModInitializer {
         }
 
         private static void key(GuiGraphicsExtractor g, Font font, String label, int x, int y, int w, float an) {
-            Ui.round(g, x, y, w, KEY, 0x4D0D1B2A);
-            if (an > 0.01f) Ui.round(g, x, y, w, KEY, Ui.a(0xD0FFFFFF, an));
-            g.fill(x + 3, y, x + w - 3, y + 1, 0x77FFFFFF);
-            int col = Ui.mix(0xFFFFFFFF, 0xFF0D1B2A, an);
-            Ui.text(g, font, label, x + (w - Ui.tw(font, label)) / 2, y + (KEY - 9) / 2, col);
+            g.fill(x, y, x + w, y + KEY, 0x70101820);
+            if (an > 0.02f) g.fill(x, y, x + w, y + KEY, Ui.a(0xCCFFFFFF, an));
+            int col = Ui.mix(0xFFFFFFFF, 0xFF101820, an);
+            Ui.text(g, font, label, x + (w - Ui.tw(font, label)) / 2, y + (KEY - 9) / 2, col, false);
         }
     }
 
@@ -433,7 +565,6 @@ public class LowSpecClient implements ClientModInitializer {
     static final class Marks {
         private static final String NAME = "LowSpec Client";
 
-        // centered under the "JAVA EDITION" part of the logo
         static void title(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
             Font font = Minecraft.getInstance().font;
             int tw = Ui.tw(font, NAME);
@@ -442,10 +573,9 @@ public class LowSpecClient implements ClientModInitializer {
             int ry = 84;
             Ui.glass(g, rx - 8, ry - 4, total + 16, 32, 1f);
             Logo.draw(g, rx, ry, 2, 1f);
-            Ui.text(g, font, NAME, rx + 30, ry + 8, 0xFFFFFFFF);
+            Ui.text(g, font, NAME, rx + 30, ry + 8, 0xFFFFFFFF, false);
         }
 
-        // bottom-right corner of the inventory screens
         static void corner(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
             Font font = Minecraft.getInstance().font;
             int tw = Ui.tw(font, NAME);
@@ -455,7 +585,7 @@ public class LowSpecClient implements ClientModInitializer {
             int y = screen.height - h - 4;
             Ui.glass(g, x, y, w, h, 1f);
             Logo.draw(g, x + 6, y + 4, 1, 1f);
-            Ui.text(g, font, NAME, x + 6 + 12 + 5, y + 6, 0xFFFFFFFF);
+            Ui.text(g, font, NAME, x + 6 + 12 + 5, y + 6, 0xFFFFFFFF, false);
         }
     }
 }
