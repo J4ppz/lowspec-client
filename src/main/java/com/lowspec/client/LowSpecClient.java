@@ -25,6 +25,8 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
@@ -57,14 +59,22 @@ public class LowSpecClient implements ClientModInitializer {
 
         ScreenEvents.AFTER_INIT.register((client, screen, width, height) -> {
             if (screen instanceof TitleScreen) {
-                ScreenEvents.afterExtract(screen).register(Title::extract);
+                ScreenEvents.afterExtract(screen).register(Watermark::title);
+            } else if (screen instanceof InventoryScreen || screen instanceof CreativeModeInventoryScreen) {
+                ScreenEvents.afterExtract(screen).register(Watermark::corner);
             }
         });
     }
 
     // ---------- Settings (saved to config/lowspec.properties) ----------
     static final class Settings {
-        static boolean fps = true, cps = true, keys = true, title = true;
+        static boolean fps = true, cps = true, keys = true, perf = false;
+
+        // video settings remembered while Performance mode is ON
+        static int prevRender = 12, prevSim = 12, prevBlend = 2;
+        static boolean prevShadows = true;
+        static double prevEntity = 1.0;
+
         private static final Path FILE =
                 FabricLoader.getInstance().getConfigDir().resolve("lowspec.properties");
 
@@ -78,8 +88,13 @@ public class LowSpecClient implements ClientModInitializer {
                 fps = Boolean.parseBoolean(p.getProperty("fps", "true"));
                 cps = Boolean.parseBoolean(p.getProperty("cps", "true"));
                 keys = Boolean.parseBoolean(p.getProperty("keys", "true"));
-                title = Boolean.parseBoolean(p.getProperty("title", "true"));
-            } catch (IOException ignored) {
+                perf = Boolean.parseBoolean(p.getProperty("perf", "false"));
+                prevRender = Integer.parseInt(p.getProperty("prevRender", "12"));
+                prevSim = Integer.parseInt(p.getProperty("prevSim", "12"));
+                prevBlend = Integer.parseInt(p.getProperty("prevBlend", "2"));
+                prevShadows = Boolean.parseBoolean(p.getProperty("prevShadows", "true"));
+                prevEntity = Double.parseDouble(p.getProperty("prevEntity", "1.0"));
+            } catch (IOException | NumberFormatException ignored) {
             }
         }
 
@@ -89,12 +104,46 @@ public class LowSpecClient implements ClientModInitializer {
                 p.setProperty("fps", Boolean.toString(fps));
                 p.setProperty("cps", Boolean.toString(cps));
                 p.setProperty("keys", Boolean.toString(keys));
-                p.setProperty("title", Boolean.toString(title));
+                p.setProperty("perf", Boolean.toString(perf));
+                p.setProperty("prevRender", Integer.toString(prevRender));
+                p.setProperty("prevSim", Integer.toString(prevSim));
+                p.setProperty("prevBlend", Integer.toString(prevBlend));
+                p.setProperty("prevShadows", Boolean.toString(prevShadows));
+                p.setProperty("prevEntity", Double.toString(prevEntity));
                 try (var out = Files.newOutputStream(FILE)) {
                     p.store(out, "LowSpec Client");
                 }
             } catch (IOException ignored) {
             }
+        }
+    }
+
+    // ---------- Performance mode ----------
+    static final class Perf {
+        static void set(boolean on) {
+            var o = Minecraft.getInstance().options;
+            if (on && !Settings.perf) {
+                Settings.prevRender = o.renderDistance().get();
+                Settings.prevSim = o.simulationDistance().get();
+                Settings.prevBlend = o.biomeBlendRadius().get();
+                Settings.prevShadows = o.entityShadows().get();
+                Settings.prevEntity = o.entityDistanceScaling().get();
+
+                o.renderDistance().set(6);
+                o.simulationDistance().set(5);
+                o.biomeBlendRadius().set(0);
+                o.entityShadows().set(false);
+                o.entityDistanceScaling().set(0.5);
+                o.save();
+            } else if (!on && Settings.perf) {
+                o.renderDistance().set(Settings.prevRender);
+                o.simulationDistance().set(Settings.prevSim);
+                o.biomeBlendRadius().set(Settings.prevBlend);
+                o.entityShadows().set(Settings.prevShadows);
+                o.entityDistanceScaling().set(Settings.prevEntity);
+                o.save();
+            }
+            Settings.perf = on;
         }
     }
 
@@ -111,7 +160,7 @@ public class LowSpecClient implements ClientModInitializer {
             toggle(x, y, "FPS counter", () -> Settings.fps, v -> Settings.fps = v);
             toggle(x, y + 24, "CPS counter", () -> Settings.cps, v -> Settings.cps = v);
             toggle(x, y + 48, "Keystrokes", () -> Settings.keys, v -> Settings.keys = v);
-            toggle(x, y + 72, "Title screen branding", () -> Settings.title, v -> Settings.title = v);
+            toggle(x, y + 72, "Performance mode", () -> Settings.perf, Perf::set);
             this.addRenderableWidget(Button.builder(Component.literal("Done"), b -> this.onClose())
                     .bounds(x, y + 102, 200, 20).build());
         }
@@ -212,16 +261,21 @@ public class LowSpecClient implements ClientModInitializer {
         }
     }
 
-    // ---------- Title screen ----------
-    static final class Title {
-        static void extract(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
-            if (!Settings.title) return;
+    // ---------- Watermark (always on) ----------
+    static final class Watermark {
+        private static final String NAME = "LowSpec Client";
+        private static final int COLOR = 0xFF55FFAA;
+
+        // centered under the "JAVA EDITION" part of the logo
+        static void title(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
             Font font = Minecraft.getInstance().font;
-            int w = screen.width, h = screen.height;
-            g.fill(0, h - 24, w, h, 0x88000000);
-            g.fill(0, h - 24, w, h - 23, 0xFF55FFAA);
-            g.text(font, "LowSpec Client", 6, h - 18, 0xFF55FFAA, true);
-            g.text(font, "light on resources", 6 + font.width("LowSpec Client") + 6, h - 18, 0xFFAAAAAA, false);
+            g.text(font, NAME, screen.width / 2 - font.width(NAME) / 2, 86, COLOR, true);
+        }
+
+        // bottom-right corner of the inventory screens
+        static void corner(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
+            Font font = Minecraft.getInstance().font;
+            g.text(font, NAME, screen.width - font.width(NAME) - 4, screen.height - 12, COLOR, true);
         }
     }
 }
