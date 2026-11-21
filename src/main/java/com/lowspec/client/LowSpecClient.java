@@ -28,6 +28,7 @@ import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.FontDescription;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.effect.MobEffectInstance;
@@ -44,6 +45,22 @@ public class LowSpecClient implements ClientModInitializer {
     private static int zoomBase;
     private static float zoomCur;
     private static boolean sprintForced;
+
+    private static final Style LOGO_STYLE = Style.EMPTY.withFont(
+            new FontDescription.Resource(Identifier.fromNamespaceAndPath("lowspec", "logo")));
+
+    // ---------- used by the mixins ----------
+    public static boolean nameTagOn() {
+        return Settings.has(Mod.NAMETAG);
+    }
+
+    public static Component withLogo(Component name) {
+        MutableComponent root = Component.empty();
+        root.append(Component.literal("\uE000").withStyle(LOGO_STYLE));
+        root.append(Component.literal(" "));
+        root.append(name);
+        return root;
+    }
 
     @Override
     public void onInitializeClient() {
@@ -125,6 +142,7 @@ public class LowSpecClient implements ClientModInitializer {
         EFFECTS("Effect timer", true),
         SPRINT("Toggle sprint", false),
         ZOOM("Zoom (hold C)", true),
+        NAMETAG("Name tag + logo", true),
         FONT("Smooth font", false),
         PERF("Performance mode", false);
 
@@ -280,7 +298,7 @@ public class LowSpecClient implements ClientModInitializer {
             g.fill(x + 2, y, x + w - 2, y + 1, 0x55FFFFFF);
         }
 
-        /** Richer frosted look, used only on static screens (menu / title / inventory). */
+        /** Richer frosted look, used only on the menu screen. */
         static void glass(GuiGraphicsExtractor g, int x, int y, int w, int h, float m) {
             rr(g, x + 1, y + 2, w, h, a(0x30000000, m));
             rr(g, x, y, w, h, a(0x700D1B2A, m));
@@ -561,31 +579,30 @@ public class LowSpecClient implements ClientModInitializer {
         }
     }
 
-    // ---------- Watermarks (always on) ----------
+    // ---------- Watermarks (always on, no background box) ----------
     static final class Marks {
         private static final String NAME = "LowSpec Client";
 
+        // centered under the "JAVA EDITION" part of the logo
         static void title(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
             Font font = Minecraft.getInstance().font;
             int tw = Ui.tw(font, NAME);
             int total = 24 + 6 + tw;
             int rx = screen.width / 2 - total / 2;
             int ry = 84;
-            Ui.glass(g, rx - 8, ry - 4, total + 16, 32, 1f);
             Logo.draw(g, rx, ry, 2, 1f);
-            Ui.text(g, font, NAME, rx + 30, ry + 8, 0xFFFFFFFF, false);
+            Ui.text(g, font, NAME, rx + 30, ry + 8, 0xFFFFFFFF, true);
         }
 
+        // bottom-right corner of the inventory screens
         static void corner(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
             Font font = Minecraft.getInstance().font;
             int tw = Ui.tw(font, NAME);
-            int w = 6 + 12 + 5 + tw + 8;
-            int h = 20;
-            int x = screen.width - w - 4;
-            int y = screen.height - h - 4;
-            Ui.glass(g, x, y, w, h, 1f);
-            Logo.draw(g, x + 6, y + 4, 1, 1f);
-            Ui.text(g, font, NAME, x + 6 + 12 + 5, y + 6, 0xFFFFFFFF, false);
+            int w = 12 + 5 + tw;
+            int x = screen.width - w - 8;
+            int y = screen.height - 12 - 6;
+            Logo.draw(g, x, y, 1, 1f);
+            Ui.text(g, font, NAME, x + 17, y + 2, 0xFFFFFFFF, true);
         }
     }
 }
