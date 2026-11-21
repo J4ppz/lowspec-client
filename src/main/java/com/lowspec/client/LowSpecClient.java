@@ -145,10 +145,25 @@ public class LowSpecClient implements ClientModInitializer {
         private static final ArrayDeque<Long> rightClicks = new ArrayDeque<>();
         private static boolean leftWas, rightWas;
 
+        private static float deltaSum;
+        private static int deltaCount;
+        private static int shownFps;
+        private static long fpsWindowStart = System.nanoTime();
+
         static void extract(GuiGraphicsExtractor g, DeltaTracker delta) {
             Minecraft mc = Minecraft.getInstance();
             Font font = mc.font;
             long now = System.nanoTime();
+
+            // FPS from the real time between frames (20 ticks = 1 second)
+            deltaSum += delta.getRealtimeDeltaTicks();
+            deltaCount++;
+            if (now - fpsWindowStart >= 500_000_000L) {
+                if (deltaSum > 0) shownFps = Math.round(20f * deltaCount / deltaSum);
+                deltaSum = 0;
+                deltaCount = 0;
+                fpsWindowStart = now;
+            }
 
             boolean left = mc.options.keyAttack.isDown();
             boolean right = mc.options.keyUse.isDown();
@@ -159,7 +174,7 @@ public class LowSpecClient implements ClientModInitializer {
 
             int y = Y;
             if (Settings.fps) {
-                g.text(font, "FPS: " + mc.getCurrentFps(), X, y, 0xFFFFFFFF, true);
+                g.text(font, "FPS: " + shownFps, X, y, 0xFFFFFFFF, true);
                 y += 10;
             }
             if (Settings.cps) {
