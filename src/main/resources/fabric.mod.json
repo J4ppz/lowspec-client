@@ -3,13 +3,16 @@
   "id": "lowspec",
   "version": "${version}",
   "name": "LowSpec Client",
-  "description": "Lightweight HUD and title screen for low-end PCs.",
+  "description": "Lightweight HUD and modules for low-end PCs.",
   "authors": ["You"],
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
     "client": ["com.lowspec.client.LowSpecClient"]
   },
+  "mixins": [
+    { "config": "lowspec.mixins.json", "environment": "client" }
+  ],
   "depends": {
     "fabricloader": ">=0.19.1",
     "minecraft": ">=26.2",
