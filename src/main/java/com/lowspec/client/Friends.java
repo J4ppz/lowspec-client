@@ -104,12 +104,15 @@ public final class Friends {
         }));
 
         ScreenEvents.AFTER_INIT.register((client, screen, width, height) -> {
-            if (screen instanceof TitleScreen) {
-                Screens.getButtons(screen).add(Button.builder(Component.literal("Friends"),
+    if (screen instanceof TitleScreen) {
+        screen.addRenderableWidget(
+                Button.builder(Component.literal("Friends"),
                         b -> client.setScreenAndShow(new FriendsScreen(screen)))
-                        .bounds(6, 6, 70, 20).build());
-            }
-        });
+                        .bounds(6, 6, 70, 20)
+                        .build()
+        );
+    }
+});
     }
 
     // ---------- presence loop ----------
