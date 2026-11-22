@@ -77,6 +77,7 @@ public class LowSpecClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         Settings.load();
+        Friends.init();
 
         KeyMapping.Category category = KeyMapping.Category.register(
                 Identifier.fromNamespaceAndPath("lowspec", "main"));
