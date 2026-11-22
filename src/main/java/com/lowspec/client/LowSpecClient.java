@@ -123,28 +123,42 @@ public class LowSpecClient implements ClientModInitializer {
         }
     }
 
-    // ---------- Smooth zoom ----------
-    private static final float[] ZOOM_SPEED = {0.6f, 0.4f, 0.2f};
+    // ---------- Smooth zoom (eases by real time, every frame) ----------
+    private static final float[] ZOOM_RATE = {26f, 15f, 8f};
+    private static long zoomLastNs = System.nanoTime();
 
     private static void tickZoom(Minecraft mc) {
+        updateZoom(mc);
+    }
+
+    /** Called from both the tick and the HUD, so it eases by real time, not by tick count. */
+    static void updateZoom(Minecraft mc) {
+        long now = System.nanoTime();
+        float dt = Math.min((now - zoomLastNs) / 1e9f, 0.1f);
+        zoomLastNs = now;
+
         var fov = mc.options.fov();
         boolean want = Settings.has(Mod.ZOOM) && zoomKey.isDown();
-        float speed = ZOOM_SPEED[Math.floorMod(Settings.get(O.ZOOM_SMOOTH), ZOOM_SPEED.length)];
+        float rate = ZOOM_RATE[Math.floorMod(Settings.get(O.ZOOM_SMOOTH), ZOOM_RATE.length)];
+        float k = 1f - (float) Math.exp(-dt * rate);
+
         if (want) {
             if (!zoomActive) {
                 zoomActive = true;
                 zoomBase = fov.get();
                 zoomCur = zoomBase;
             }
-            zoomCur += (Settings.get(O.ZOOM_FOV) - zoomCur) * speed;
-            fov.set(Math.round(zoomCur));
+            zoomCur += (Settings.get(O.ZOOM_FOV) - zoomCur) * k;
+            int target = Math.round(zoomCur);
+            if (fov.get() != target) fov.set(target);
         } else if (zoomActive) {
-            zoomCur += (zoomBase - zoomCur) * speed;
-            if (Math.abs(zoomBase - zoomCur) < 0.8f) {
+            zoomCur += (zoomBase - zoomCur) * k;
+            if (Math.abs(zoomBase - zoomCur) < 0.6f) {
                 fov.set(zoomBase);
                 zoomActive = false;
             } else {
-                fov.set(Math.round(zoomCur));
+                int target = Math.round(zoomCur);
+                if (fov.get() != target) fov.set(target);
             }
         }
     }
@@ -477,16 +491,13 @@ public class LowSpecClient implements ClientModInitializer {
         static void rrAA(GuiGraphicsExtractor g, int x, int y, int w, int h, int c) {
             int e0 = a(c, 0.66f);
             int e1 = a(c, 0.60f);
-            // top rows
             g.fill(x + 1, y, x + 2, y + 1, e0);
             g.fill(x + 2, y, x + w - 2, y + 1, c);
             g.fill(x + w - 2, y, x + w - 1, y + 1, e0);
             g.fill(x, y + 1, x + 1, y + 2, e1);
             g.fill(x + 1, y + 1, x + w - 1, y + 2, c);
             g.fill(x + w - 1, y + 1, x + w, y + 2, e1);
-            // middle
             g.fill(x, y + 2, x + w, y + h - 2, c);
-            // bottom rows
             g.fill(x, y + h - 2, x + 1, y + h - 1, e1);
             g.fill(x + 1, y + h - 2, x + w - 1, y + h - 1, c);
             g.fill(x + w - 1, y + h - 2, x + w, y + h - 1, e1);
@@ -829,6 +840,8 @@ public class LowSpecClient implements ClientModInitializer {
             Minecraft mc = Minecraft.getInstance();
             Font font = mc.font;
             long now = System.nanoTime();
+
+            updateZoom(mc);
 
             float dt = Math.min((now - lastNs) / 1e9f, 0.25f);
             lastNs = now;
