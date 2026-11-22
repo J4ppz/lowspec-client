@@ -12,6 +12,7 @@ import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElement;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
@@ -19,6 +20,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.Options;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
@@ -26,6 +28,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.client.input.KeyEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.FontDescription;
 import net.minecraft.network.chat.MutableComponent;
@@ -45,6 +48,8 @@ public class LowSpecClient implements ClientModInitializer {
     private static int zoomBase;
     private static float zoomCur;
     private static boolean sprintForced;
+
+    private static final HudElement NO_HUD = (graphics, delta) -> { };
 
     private static final Style LOGO_STYLE = Style.EMPTY.withFont(
             new FontDescription.Resource(Identifier.fromNamespaceAndPath("lowspec", "logo")));
@@ -80,6 +85,10 @@ public class LowSpecClient implements ClientModInitializer {
             tickSprint(client);
             tickZoom(client);
         });
+
+        // Hide the vanilla effect icons while our Effect timer module is on.
+        HudElementRegistry.replaceElement(VanillaHudElements.MOB_EFFECTS,
+                original -> Settings.has(Mod.EFFECTS) ? NO_HUD : original);
 
         HudElementRegistry.attachElementBefore(
                 VanillaHudElements.CHAT,
@@ -141,7 +150,7 @@ public class LowSpecClient implements ClientModInitializer {
         ARMOR("Armor HUD", true),
         EFFECTS("Effect timer", true),
         SPRINT("Toggle sprint", false),
-        ZOOM("Zoom (hold C)", true),
+        ZOOM("Zoom", true),
         NAMETAG("Name tag + logo", true),
         FONT("Smooth font", false),
         PERF("Performance mode", false);
@@ -155,6 +164,19 @@ public class LowSpecClient implements ClientModInitializer {
         }
     }
 
+    enum ArmorPos {
+        VERTICAL("Vertical (right)"),
+        HORIZONTAL("Horizontal (hotbar)"),
+        BOTTOM_LEFT("Bottom left"),
+        BOTTOM_RIGHT("Bottom right");
+
+        final String label;
+
+        ArmorPos(String label) {
+            this.label = label;
+        }
+    }
+
     // ---------- Settings (saved to config/lowspec.properties) ----------
     static final class Settings {
         private static final boolean[] ON = new boolean[Mod.values().length];
@@ -162,6 +184,8 @@ public class LowSpecClient implements ClientModInitializer {
         static {
             for (Mod m : Mod.values()) ON[m.ordinal()] = m.def;
         }
+
+        static int armorPos = 0;
 
         static int prevRender = 12, prevSim = 12, prevBlend = 2;
         static boolean prevShadows = true;
@@ -189,6 +213,7 @@ public class LowSpecClient implements ClientModInitializer {
                     ON[m.ordinal()] = Boolean.parseBoolean(
                             p.getProperty("mod." + m.name(), Boolean.toString(m.def)));
                 }
+                armorPos = Math.floorMod(Integer.parseInt(p.getProperty("armorPos", "0")), ArmorPos.values().length);
                 prevRender = Integer.parseInt(p.getProperty("prevRender", "12"));
                 prevSim = Integer.parseInt(p.getProperty("prevSim", "12"));
                 prevBlend = Integer.parseInt(p.getProperty("prevBlend", "2"));
@@ -204,6 +229,7 @@ public class LowSpecClient implements ClientModInitializer {
                 for (Mod m : Mod.values()) {
                     p.setProperty("mod." + m.name(), Boolean.toString(ON[m.ordinal()]));
                 }
+                p.setProperty("armorPos", Integer.toString(armorPos));
                 p.setProperty("prevRender", Integer.toString(prevRender));
                 p.setProperty("prevSim", Integer.toString(prevSim));
                 p.setProperty("prevBlend", Integer.toString(prevBlend));
@@ -219,29 +245,58 @@ public class LowSpecClient implements ClientModInitializer {
 
     // ---------- Performance mode ----------
     static final class Perf {
-        static void set(boolean enable) {
-            var o = Minecraft.getInstance().options;
-            boolean current = Settings.has(Mod.PERF);
-            if (enable && !current) {
-                Settings.prevRender = o.renderDistance().get();
-                Settings.prevSim = o.simulationDistance().get();
-                Settings.prevBlend = o.biomeBlendRadius().get();
-                Settings.prevShadows = o.entityShadows().get();
-                Settings.prevEntity = o.entityDistanceScaling().get();
+        private static final int LOW_RENDER = 6, LOW_SIM = 5;
 
-                o.renderDistance().set(6);
-                o.simulationDistance().set(5);
-                o.biomeBlendRadius().set(0);
-                o.entityShadows().set(false);
-                o.entityDistanceScaling().set(0.5);
+        private static boolean looksLow(int render, int sim) {
+            return render <= LOW_RENDER && sim <= LOW_SIM;
+        }
+
+        static void set(boolean enable) {
+            Options o = Minecraft.getInstance().options;
+            try {
+                if (enable) {
+                    int rd = o.renderDistance().get();
+                    int sim = o.simulationDistance().get();
+                    if (!looksLow(rd, sim)) {
+                        // remember the normal settings
+                        Settings.prevRender = rd;
+                        Settings.prevSim = sim;
+                        Settings.prevBlend = o.biomeBlendRadius().get();
+                        Settings.prevShadows = o.entityShadows().get();
+                        Settings.prevEntity = o.entityDistanceScaling().get();
+                    } else if (looksLow(Settings.prevRender, Settings.prevSim)) {
+                        // settings were already low and nothing sensible is stored: use vanilla defaults
+                        Settings.prevRender = 12;
+                        Settings.prevSim = 12;
+                        Settings.prevBlend = 2;
+                        Settings.prevShadows = true;
+                        Settings.prevEntity = 1.0;
+                    }
+                    o.renderDistance().set(LOW_RENDER);
+                    o.simulationDistance().set(LOW_SIM);
+                    o.biomeBlendRadius().set(0);
+                    o.entityShadows().set(false);
+                    o.entityDistanceScaling().set(0.5);
+                } else {
+                    int rd = Settings.prevRender, sim = Settings.prevSim;
+                    int blend = Settings.prevBlend;
+                    boolean shadows = Settings.prevShadows;
+                    double entity = Settings.prevEntity;
+                    if (looksLow(rd, sim)) {
+                        rd = 12;
+                        sim = 12;
+                        blend = 2;
+                        shadows = true;
+                        entity = 1.0;
+                    }
+                    o.renderDistance().set(rd);
+                    o.simulationDistance().set(sim);
+                    o.biomeBlendRadius().set(blend);
+                    o.entityShadows().set(shadows);
+                    o.entityDistanceScaling().set(entity);
+                }
                 o.save();
-            } else if (!enable && current) {
-                o.renderDistance().set(Settings.prevRender);
-                o.simulationDistance().set(Settings.prevSim);
-                o.biomeBlendRadius().set(Settings.prevBlend);
-                o.entityShadows().set(Settings.prevShadows);
-                o.entityDistanceScaling().set(Settings.prevEntity);
-                o.save();
+            } catch (RuntimeException ignored) {
             }
             Settings.put(Mod.PERF, enable);
         }
@@ -338,9 +393,11 @@ public class LowSpecClient implements ClientModInitializer {
         private static final Mod[] MODS = Mod.values();
         private final float[] on = new float[MODS.length];
         private final float[] hover = new float[MODS.length];
+        private final float[] actionHover = new float[2];
         private float doneHover;
+        private boolean listening;
         private long openNs, lastNs;
-        private int px, py, pw, ph, cw, doneY;
+        private int px, py, pw, ph, cw, rows, doneY;
 
         MenuScreen() {
             super(Component.literal("LowSpec Client"));
@@ -354,14 +411,19 @@ public class LowSpecClient implements ClientModInitializer {
             return py + 40 + (i / 2) * 26;
         }
 
+        private int actionY(int j) {
+            return py + 40 + rows * 26 + j * 26;
+        }
+
         @Override
         protected void init() {
             pw = 300;
             cw = (pw - 30) / 2;
-            int rows = (MODS.length + 1) / 2;
-            ph = 40 + rows * 26 + 34;
+            rows = (MODS.length + 1) / 2;
+            ph = 40 + rows * 26 + 2 * 26 + 34;
             px = (this.width - pw) / 2;
             py = Math.max(2, (this.height - ph) / 2);
+            listening = false;
 
             // Invisible vanilla buttons: they only handle clicks. Drawing is custom below.
             for (int i = 0; i < MODS.length; i++) {
@@ -374,11 +436,37 @@ public class LowSpecClient implements ClientModInitializer {
                     Settings.save();
                 }).bounds(cellX(i), cellY(i), cw, 22).build());
             }
-            doneY = py + 40 + rows * 26 + 4;
+
+            // armor position: click to cycle
+            this.addRenderableWidget(Button.builder(Component.empty(), b -> {
+                Settings.armorPos = (Settings.armorPos + 1) % ArmorPos.values().length;
+                Settings.save();
+            }).bounds(px + 10, actionY(0), pw - 20, 22).build());
+
+            // zoom key: click, then press the new key
+            this.addRenderableWidget(Button.builder(Component.empty(), b -> listening = !listening)
+                    .bounds(px + 10, actionY(1), pw - 20, 22).build());
+
+            doneY = actionY(2) + 4;
             this.addRenderableWidget(Button.builder(Component.empty(), b -> this.onClose())
                     .bounds(px + 10, doneY, pw - 20, 22).build());
 
             openNs = lastNs = System.nanoTime();
+        }
+
+        @Override
+        public boolean keyPressed(KeyEvent event) {
+            if (listening) {
+                int code = event.key();
+                listening = false;
+                if (code != InputConstants.KEY_ESCAPE) {
+                    zoomKey.setKey(InputConstants.Type.KEYSYM.getOrCreate(code));
+                    KeyMapping.resetMapping();
+                    Minecraft.getInstance().options.save();
+                }
+                return true;
+            }
+            return super.keyPressed(event);
         }
 
         @Override
@@ -411,6 +499,28 @@ public class LowSpecClient implements ClientModInitializer {
                 int sy = y + 5;
                 Ui.rr(g, sx, sy, 24, 12, Ui.a(Ui.mix(0x66FFFFFF, 0xFF55FFAA, on[i]), e));
                 Ui.rr(g, sx + 2 + (int) (on[i] * 12), sy + 2, 8, 8, Ui.a(0xFFFFFFFF, e));
+            }
+
+            // action rows: armor position + zoom key
+            for (int j = 0; j < 2; j++) {
+                int ay = actionY(j);
+                boolean hov = mx >= px + 10 && mx < px + pw - 10 && my >= ay && my < ay + 22;
+                actionHover[j] += ((hov ? 1f : 0f) - actionHover[j]) * k;
+                Ui.rr(g, px + 10, ay + oy, pw - 20, 22, Ui.a(Ui.mix(0x30FFFFFF, 0x55FFFFFF, actionHover[j]), e));
+
+                String label = j == 0 ? "Armor HUD position" : "Zoom key";
+                String value;
+                int vcol = 0xFF55FFAA;
+                if (j == 0) {
+                    value = ArmorPos.values()[Settings.armorPos].label;
+                } else if (listening) {
+                    value = "press a key...";
+                    vcol = 0xFFFFE066;
+                } else {
+                    value = zoomKey.getTranslatedKeyMessage().getString();
+                }
+                Ui.text(g, f, label, px + 18, ay + oy + 7, Ui.a(0xFFFFFFFF, e), false);
+                Ui.text(g, f, value, px + pw - 18 - Ui.tw(f, value), ay + oy + 7, Ui.a(vcol, e), false);
             }
 
             boolean dh = mx >= px + 10 && mx < px + pw - 10 && my >= doneY && my < doneY + 22;
@@ -521,29 +631,11 @@ public class LowSpecClient implements ClientModInitializer {
 
             if (mc.player == null) return;
 
-            // ----- armor HUD (right side) -----
-            if (Settings.has(Mod.ARMOR)) {
-                int ax = W - 22;
-                int ay = H / 2 - 38;
-                for (EquipmentSlot slot : SLOTS) {
-                    ItemStack s = mc.player.getItemBySlot(slot);
-                    if (!s.isEmpty()) {
-                        g.item(s, ax, ay);
-                        if (s.isDamageableItem()) {
-                            int max = s.getMaxDamage();
-                            int pct = (max - s.getDamageValue()) * 100 / max;
-                            String t = pct + "%";
-                            int col = pct > 60 ? 0xFF55FF55 : pct > 35 ? 0xFFFFFF55 : 0xFFFF5555;
-                            Ui.text(g, font, t, ax - 3 - Ui.tw(font, t), ay + 4, col, true);
-                        }
-                    }
-                    ay += 18;
-                }
-            }
+            if (Settings.has(Mod.ARMOR)) armor(g, font, mc, W, H);
 
-            // ----- effect timer (top right, under the vanilla effect icons) -----
+            // ----- effect timer (top right) -----
             if (Settings.has(Mod.EFFECTS)) {
-                int ey = 60;
+                int ey = Y;
                 for (MobEffectInstance e : mc.player.getActiveEffects()) {
                     String name = e.getEffect().value().getDisplayName().getString();
                     if (e.getAmplifier() > 0) name += " " + (e.getAmplifier() + 1);
@@ -557,6 +649,64 @@ public class LowSpecClient implements ClientModInitializer {
                     ey += 18;
                 }
             }
+        }
+
+        // ----- armor HUD -----
+        private static void armor(GuiGraphicsExtractor g, Font font, Minecraft mc, int W, int H) {
+            ArmorPos pos = ArmorPos.values()[Settings.armorPos];
+
+            if (pos == ArmorPos.VERTICAL) {
+                int ax = W - 22;
+                int ay = H / 2 - 38;
+                for (EquipmentSlot slot : SLOTS) {
+                    ItemStack s = mc.player.getItemBySlot(slot);
+                    if (!s.isEmpty()) {
+                        g.item(s, ax, ay);
+                        if (s.isDamageableItem()) {
+                            String t = pct(s) + "%";
+                            Ui.text(g, font, t, ax - 3 - Ui.tw(font, t), ay + 4, pctColor(s), true);
+                        }
+                    }
+                    ay += 18;
+                }
+                return;
+            }
+
+            int slotW = 28;
+            int total = 4 * slotW;
+            int x0;
+            int y0;
+            if (pos == ArmorPos.HORIZONTAL) {
+                x0 = W / 2 - total / 2;
+                y0 = H - 88;
+            } else if (pos == ArmorPos.BOTTOM_LEFT) {
+                x0 = 6;
+                y0 = H - 33;
+            } else {
+                x0 = W - total - 6;
+                y0 = H - 33;
+            }
+            for (int i = 0; i < SLOTS.length; i++) {
+                ItemStack s = mc.player.getItemBySlot(SLOTS[i]);
+                int x = x0 + i * slotW + (slotW - 16) / 2;
+                if (!s.isEmpty()) {
+                    g.item(s, x, y0);
+                    if (s.isDamageableItem()) {
+                        String t = pct(s) + "%";
+                        Ui.text(g, font, t, x + 8 - Ui.tw(font, t) / 2, y0 + 17, pctColor(s), true);
+                    }
+                }
+            }
+        }
+
+        private static int pct(ItemStack s) {
+            int max = s.getMaxDamage();
+            return max <= 0 ? 100 : (max - s.getDamageValue()) * 100 / max;
+        }
+
+        private static int pctColor(ItemStack s) {
+            int p = pct(s);
+            return p > 60 ? 0xFF55FF55 : p > 35 ? 0xFFFFFF55 : 0xFFFF5555;
         }
 
         private static String fmt(int ticks) {
@@ -583,7 +733,6 @@ public class LowSpecClient implements ClientModInitializer {
     static final class Marks {
         private static final String NAME = "LowSpec Client";
 
-        // centered under the "JAVA EDITION" part of the logo
         static void title(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
             Font font = Minecraft.getInstance().font;
             int tw = Ui.tw(font, NAME);
@@ -594,7 +743,6 @@ public class LowSpecClient implements ClientModInitializer {
             Ui.text(g, font, NAME, rx + 30, ry + 8, 0xFFFFFFFF, true);
         }
 
-        // bottom-right corner of the inventory screens
         static void corner(Screen screen, GuiGraphicsExtractor g, int mouseX, int mouseY, float tickDelta) {
             Font font = Minecraft.getInstance().font;
             int tw = Ui.tw(font, NAME);
