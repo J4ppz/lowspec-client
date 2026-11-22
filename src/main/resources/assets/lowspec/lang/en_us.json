@@ -1,5 +1,7 @@
 {
   "key.category.lowspec.main": "LowSpec Client",
+  "key.category.lowspec.social": "LowSpec Social",
   "key.lowspec.menu": "Open LowSpec menu",
-  "key.lowspec.zoom": "Zoom"
+  "key.lowspec.zoom": "Zoom",
+  "key.lowspec.friends": "Open friends"
 }
