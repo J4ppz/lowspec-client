@@ -1,11 +1,13 @@
 package com.lowspec.client;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.Properties;
+import java.util.function.Consumer;
 
 import com.mojang.blaze3d.platform.InputConstants;
 
@@ -20,6 +22,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -88,6 +91,8 @@ public class LowSpecClient implements ClientModInitializer {
             }
             tickSprint(client);
             tickZoom(client);
+            Perf.enforceOne(client);
+            Gov.tick(client);
         });
 
         HudElementRegistry.replaceElement(VanillaHudElements.MOB_EFFECTS,
@@ -135,7 +140,6 @@ public class LowSpecClient implements ClientModInitializer {
         updateZoom(mc);
     }
 
-    /** Called from both the tick and the HUD, so it eases by real time, not by tick count. */
     static void updateZoom(Minecraft mc) {
         long now = System.nanoTime();
         float dt = Math.min((now - zoomLastNs) / 1e9f, 0.1f);
@@ -255,6 +259,17 @@ public class LowSpecClient implements ClientModInitializer {
         static final Opt PERF_SHADOWS = Opt.bool("perf.shadows", "Entity shadows", false);
         static final Opt PERF_ENT = Opt.num("perf.ent", "Entity distance", 50, 50, 100, 25, "%");
         static final Opt PERF_BLEND = Opt.num("perf.blend", "Biome blend", 0, 0, 4, 1, "");
+
+        static final Opt TW_PART = Opt.bool("tw.part", "Minimal particles", true);
+        static final Opt TW_CLOUDS = Opt.bool("tw.clouds", "Clouds off", true);
+        static final Opt TW_GFX = Opt.bool("tw.gfx", "Fast graphics", true);
+        static final Opt TW_BLUR = Opt.bool("tw.blur", "Menu blur off", true);
+        static final Opt TW_WEATHER = Opt.bool("tw.weather", "Light weather", true);
+        static final Opt TW_VSYNC = Opt.bool("tw.vsync", "VSync off", false);
+
+        static final Opt DYN_TARGET = Opt.num("dyn.target", "Target FPS", 60, 30, 144, 10, "");
+        static final Opt DYN_MIN = Opt.num("dyn.min", "Minimum distance", 4, 2, 16, 1, "");
+        static final Opt DYN_MAX = Opt.num("dyn.max", "Maximum distance", 10, 3, 24, 1, "");
     }
 
     // ---------- Modules ----------
@@ -270,7 +285,9 @@ public class LowSpecClient implements ClientModInitializer {
         ZOOM("Zoom", true, O.ZOOM_KEY, O.ZOOM_FOV, O.ZOOM_SMOOTH),
         NAMETAG("Name tag + logo", true, O.NT_SELF, O.NT_LOGO),
         FONT("Smooth font", false),
-        PERF("Performance mode", false, O.PERF_ONE, O.PERF_RD, O.PERF_SIM, O.PERF_SHADOWS, O.PERF_ENT, O.PERF_BLEND);
+        PERF("Performance mode", false, O.PERF_ONE, O.PERF_RD, O.PERF_SIM, O.PERF_SHADOWS, O.PERF_ENT, O.PERF_BLEND),
+        TWEAKS("FPS tweaks", false, O.TW_PART, O.TW_CLOUDS, O.TW_GFX, O.TW_BLUR, O.TW_WEATHER, O.TW_VSYNC),
+        DYNRD("Dynamic distance", false, O.DYN_TARGET, O.DYN_MIN, O.DYN_MAX);
 
         final String label;
         final boolean def;
@@ -287,6 +304,8 @@ public class LowSpecClient implements ClientModInitializer {
     static final class Settings {
         private static final boolean[] ON = new boolean[Mod.values().length];
         private static final HashMap<String, Integer> VALS = new HashMap<>();
+        /** Original values of the options that FPS tweaks changed (so they can be restored). */
+        static final HashMap<String, String> TWEAK_PREV = new HashMap<>();
 
         static {
             for (Mod m : Mod.values()) ON[m.ordinal()] = m.def;
@@ -341,6 +360,9 @@ public class LowSpecClient implements ClientModInitializer {
                         }
                     }
                 }
+                for (String k : p.stringPropertyNames()) {
+                    if (k.startsWith("tweakprev.")) TWEAK_PREV.put(k.substring(10), p.getProperty(k));
+                }
                 prevRender = Integer.parseInt(p.getProperty("prevRender", "12"));
                 prevSim = Integer.parseInt(p.getProperty("prevSim", "12"));
                 prevBlend = Integer.parseInt(p.getProperty("prevBlend", "2"));
@@ -360,6 +382,7 @@ public class LowSpecClient implements ClientModInitializer {
                         p.setProperty("opt." + o.id, Integer.toString(get(o)));
                     }
                 }
+                for (var e : TWEAK_PREV.entrySet()) p.setProperty("tweakprev." + e.getKey(), e.getValue());
                 p.setProperty("prevRender", Integer.toString(prevRender));
                 p.setProperty("prevSim", Integer.toString(prevSim));
                 p.setProperty("prevBlend", Integer.toString(prevBlend));
@@ -373,8 +396,10 @@ public class LowSpecClient implements ClientModInitializer {
         }
     }
 
-    // ---------- Performance mode ----------
+    // ---------- Performance mode (+ 1 chunk render distance) ----------
     static final class Perf {
+        private static long lastForceMs;
+
         private static boolean looksLow(int render, int sim) {
             return render <= Settings.get(O.PERF_RD) && sim <= Settings.get(O.PERF_SIM);
         }
@@ -387,13 +412,56 @@ public class LowSpecClient implements ClientModInitializer {
             o.entityDistanceScaling().set(Settings.get(O.PERF_ENT) / 100.0);
         }
 
-        /** Makes the game rebuild its view of the world (needed after the 1-chunk switch changes). */
-        static void rebuild() {
+        /**
+         * The game refuses render distances below 2 and silently resets them. So this writes the value
+         * straight into the option and then runs the game's own "value changed" callback, which makes
+         * the renderer rebuild. It only uses OptionInstance's internals, not any 26.2-specific method.
+         */
+        static boolean forceRender(Options o, int v) {
             try {
-                Options o = Minecraft.getInstance().options;
-                int cur = o.renderDistance().get();
-                o.renderDistance().set(cur == 2 ? 3 : 2);
-                o.renderDistance().set(cur);
+                var opt = o.renderDistance();
+                Field value = OptionInstance.class.getDeclaredField("value");
+                value.setAccessible(true);
+                value.set(opt, v);
+                try {
+                    Field cb = OptionInstance.class.getDeclaredField("onValueUpdate");
+                    cb.setAccessible(true);
+                    @SuppressWarnings("unchecked")
+                    Consumer<Object> c = (Consumer<Object>) cb.get(opt);
+                    if (c != null) c.accept(v);
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                }
+                return true;
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                return false;
+            }
+        }
+
+        /** Every tick: if 1 chunk is wanted and something put the value back, force it again. */
+        static void enforceOne(Minecraft mc) {
+            if (!Settings.has(Mod.PERF) || !Settings.flag(O.PERF_ONE)) return;
+            long now = System.currentTimeMillis();
+            if (now - lastForceMs < 2000) return;
+            try {
+                if (mc.options.renderDistance().get() != 1) {
+                    lastForceMs = now;
+                    forceRender(mc.options, 1);
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+
+        /** Called when the "1 chunk" switch is flipped. */
+        static void syncOne() {
+            if (!Settings.has(Mod.PERF)) return;
+            Options o = Minecraft.getInstance().options;
+            try {
+                if (Settings.flag(O.PERF_ONE)) {
+                    lastForceMs = System.currentTimeMillis();
+                    forceRender(o, 1);
+                } else {
+                    o.renderDistance().set(Settings.get(O.PERF_RD));
+                }
             } catch (RuntimeException ignored) {
             }
         }
@@ -451,7 +519,124 @@ public class LowSpecClient implements ClientModInitializer {
             } catch (RuntimeException ignored) {
             }
             Settings.put(Mod.PERF, enable);
-            if (Settings.flag(O.PERF_ONE)) rebuild();
+            if (enable && Settings.flag(O.PERF_ONE)) {
+                lastForceMs = System.currentTimeMillis();
+                forceRender(o, 1);
+            }
+        }
+    }
+
+    // ---------- FPS tweaks (set through reflection, so a missing option is just skipped) ----------
+    static final class Tweaks {
+        private record T(String accessor, Opt opt, String low, String fallback) { }
+
+        private static final T[] ALL = {
+                new T("particles", O.TW_PART, "MINIMAL", "ALL"),
+                new T("cloudStatus", O.TW_CLOUDS, "OFF", "FANCY"),
+                new T("graphicsPreset", O.TW_GFX, "FAST", "FANCY"),
+                new T("graphicsMode", O.TW_GFX, "FAST", "FANCY"),
+                new T("menuBackgroundBlurriness", O.TW_BLUR, "0", "5"),
+                new T("weatherRadius", O.TW_WEATHER, "3", "10"),
+                new T("enableVsync", O.TW_VSYNC, "false", "true"),
+        };
+
+        private static String read(String accessor) throws ReflectiveOperationException {
+            Object inst = Options.class.getMethod(accessor).invoke(Minecraft.getInstance().options);
+            Object v = OptionInstance.class.getMethod("get").invoke(inst);
+            return v instanceof Enum<?> e ? e.name() : String.valueOf(v);
+        }
+
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        private static void write(String accessor, String value) throws ReflectiveOperationException {
+            Object inst = Options.class.getMethod(accessor).invoke(Minecraft.getInstance().options);
+            Object cur = OptionInstance.class.getMethod("get").invoke(inst);
+            Object nv;
+            if (cur instanceof Enum<?> e) nv = Enum.valueOf((Class) e.getDeclaringClass(), value);
+            else if (cur instanceof Boolean) nv = Boolean.parseBoolean(value);
+            else if (cur instanceof Integer) nv = Integer.parseInt(value);
+            else if (cur instanceof Double) nv = Double.parseDouble(value);
+            else throw new NoSuchMethodException("unsupported option type");
+            OptionInstance.class.getMethod("set", Object.class).invoke(inst, nv);
+        }
+
+        /** Applies every enabled tweak and restores every disabled one. Safe to call any time. */
+        static void refresh() {
+            boolean on = Settings.has(Mod.TWEAKS);
+            boolean changed = false;
+            for (T t : ALL) {
+                boolean want = on && Settings.flag(t.opt());
+                String prev = Settings.TWEAK_PREV.get(t.accessor());
+                try {
+                    if (want && prev == null) {
+                        String cur = read(t.accessor());
+                        write(t.accessor(), t.low());
+                        Settings.TWEAK_PREV.put(t.accessor(), cur.equals(t.low()) ? t.fallback() : cur);
+                        changed = true;
+                    } else if (!want && prev != null) {
+                        write(t.accessor(), prev);
+                        Settings.TWEAK_PREV.remove(t.accessor());
+                        changed = true;
+                    }
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                }
+            }
+            if (changed) {
+                Settings.save();
+                try {
+                    Minecraft.getInstance().options.save();
+                } catch (RuntimeException ignored) {
+                }
+            }
+        }
+    }
+
+    // ---------- Dynamic render distance (keeps FPS near your target) ----------
+    static final class Gov {
+        private static long nextMs;
+        private static int low, high;
+
+        static void tick(Minecraft mc) {
+            if (!Settings.has(Mod.DYNRD) || mc.player == null) return;
+            if (Settings.has(Mod.PERF)) return; // Performance mode owns the distance
+            long now = System.currentTimeMillis();
+            if (now < nextMs) return;
+            nextMs = now + 2000;
+
+            int fps = Hud.shownFps;
+            if (fps <= 0) return;
+            int target = Settings.get(O.DYN_TARGET);
+            int min = Settings.get(O.DYN_MIN);
+            int max = Math.max(min, Settings.get(O.DYN_MAX));
+            try {
+                var opt = mc.options.renderDistance();
+                int cur = opt.get();
+
+                if (fps < target - 5) {
+                    low++;
+                    high = 0;
+                } else if (fps > target + 25) {
+                    high++;
+                    low = 0;
+                } else {
+                    low = 0;
+                    high = 0;
+                }
+
+                if (cur > max) {
+                    opt.set(max);
+                } else if (cur < min) {
+                    opt.set(min);
+                } else if (low >= 2 && cur > min) {
+                    opt.set(cur - 1);
+                    low = 0;
+                    nextMs = now + 6000; // let the world rebuild before judging again
+                } else if (high >= 4 && cur < max) {
+                    opt.set(cur + 1);
+                    high = 0;
+                    nextMs = now + 6000;
+                }
+            } catch (RuntimeException ignored) {
+            }
         }
     }
 
@@ -599,7 +784,7 @@ public class LowSpecClient implements ClientModInitializer {
             rows = (MODS.length + COLS - 1) / COLS;
             pw = Math.min(480, this.width - 16);
             cw = (pw - 24 - (COLS - 1) * 8) / COLS;
-            rowH = Math.max(24, Math.min(32, (this.height - 8 - 96) / rows));
+            rowH = Math.max(22, Math.min(32, (this.height - 8 - 96) / rows));
             ch = rowH - 4;
             ph = 52 + rows * rowH + 40;
             px = (this.width - pw) / 2;
@@ -621,8 +806,12 @@ public class LowSpecClient implements ClientModInitializer {
                 int w = cw - (mod.opts.length > 0 ? 16 : 0);
                 this.addRenderableWidget(Button.builder(Component.empty(), b -> {
                     boolean now = !Settings.has(mod);
-                    if (mod == Mod.PERF) Perf.set(now);
-                    else Settings.put(mod, now);
+                    if (mod == Mod.PERF) {
+                        Perf.set(now);
+                    } else {
+                        Settings.put(mod, now);
+                        if (mod == Mod.TWEAKS) Tweaks.refresh();
+                    }
                     Settings.save();
                 }).bounds(cellX(i), cellY(i), w, ch).build());
             }
@@ -716,8 +905,10 @@ public class LowSpecClient implements ClientModInitializer {
             }
             Settings.save();
             if (mod == Mod.PERF) {
-                if (o == O.PERF_ONE) Perf.rebuild();
+                if (o == O.PERF_ONE) Perf.syncOne();
                 else Perf.refresh();
+            } else if (mod == Mod.TWEAKS) {
+                Tweaks.refresh();
             }
         }
 
@@ -786,9 +977,16 @@ public class LowSpecClient implements ClientModInitializer {
             g.fill(0, 0, this.width, this.height, Ui.a(0x78000000, e));
             Ui.bigPanel(g, px, py + oy, pw, ph, e);
 
+            String sub = "Settings";
+            if (mod == Mod.PERF || mod == Mod.DYNRD) {
+                try {
+                    sub = "Current render distance: " + Minecraft.getInstance().options.renderDistance().get();
+                } catch (RuntimeException ignored) {
+                }
+            }
             Logo.draw(g, px + 14, py + oy + 12, 2, e);
             Ui.text(g, f, mod.label, px + 14 + 32, py + oy + 14, white, false);
-            Ui.text(g, f, "Settings", px + 14 + 32, py + oy + 27, Ui.a(0xFF9AA4C0, e), false);
+            Ui.text(g, f, sub, px + 14 + 32, py + oy + 27, Ui.a(0xFF9AA4C0, e), false);
 
             for (int i = 0; i < mod.opts.length; i++) {
                 Opt o = mod.opts[i];
