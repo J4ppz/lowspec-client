@@ -58,6 +58,10 @@ public class LowSpecClient implements ClientModInitializer {
         return Settings.has(Mod.NAMETAG) && Settings.flag(O.NT_SELF);
     }
 
+    public static boolean oneChunk() {
+        return Settings.has(Mod.PERF) && Settings.flag(O.PERF_ONE);
+    }
+
     public static Component withLogo(Component name) {
         if (!Settings.flag(O.NT_LOGO)) return name;
         MutableComponent root = Component.empty();
@@ -245,6 +249,7 @@ public class LowSpecClient implements ClientModInitializer {
         static final Opt NT_SELF = Opt.bool("nt.self", "Own tag in third person", true);
         static final Opt NT_LOGO = Opt.bool("nt.logo", "Show logo", true);
 
+        static final Opt PERF_ONE = Opt.bool("perf.one", "1 chunk render distance", false);
         static final Opt PERF_RD = Opt.num("perf.rd", "Render distance", 6, 2, 12, 1, "");
         static final Opt PERF_SIM = Opt.num("perf.sim", "Simulation distance", 5, 5, 12, 1, "");
         static final Opt PERF_SHADOWS = Opt.bool("perf.shadows", "Entity shadows", false);
@@ -265,7 +270,7 @@ public class LowSpecClient implements ClientModInitializer {
         ZOOM("Zoom", true, O.ZOOM_KEY, O.ZOOM_FOV, O.ZOOM_SMOOTH),
         NAMETAG("Name tag + logo", true, O.NT_SELF, O.NT_LOGO),
         FONT("Smooth font", false),
-        PERF("Performance mode", false, O.PERF_RD, O.PERF_SIM, O.PERF_SHADOWS, O.PERF_ENT, O.PERF_BLEND);
+        PERF("Performance mode", false, O.PERF_ONE, O.PERF_RD, O.PERF_SIM, O.PERF_SHADOWS, O.PERF_ENT, O.PERF_BLEND);
 
         final String label;
         final boolean def;
@@ -382,6 +387,17 @@ public class LowSpecClient implements ClientModInitializer {
             o.entityDistanceScaling().set(Settings.get(O.PERF_ENT) / 100.0);
         }
 
+        /** Makes the game rebuild its view of the world (needed after the 1-chunk switch changes). */
+        static void rebuild() {
+            try {
+                Options o = Minecraft.getInstance().options;
+                int cur = o.renderDistance().get();
+                o.renderDistance().set(cur == 2 ? 3 : 2);
+                o.renderDistance().set(cur);
+            } catch (RuntimeException ignored) {
+            }
+        }
+
         /** Re-apply the low preset after its settings changed (only while the mode is ON). */
         static void refresh() {
             if (!Settings.has(Mod.PERF)) return;
@@ -435,6 +451,7 @@ public class LowSpecClient implements ClientModInitializer {
             } catch (RuntimeException ignored) {
             }
             Settings.put(Mod.PERF, enable);
+            if (Settings.flag(O.PERF_ONE)) rebuild();
         }
     }
 
@@ -698,7 +715,10 @@ public class LowSpecClient implements ClientModInitializer {
                 default -> { }
             }
             Settings.save();
-            if (mod == Mod.PERF) Perf.refresh();
+            if (mod == Mod.PERF) {
+                if (o == O.PERF_ONE) Perf.rebuild();
+                else Perf.refresh();
+            }
         }
 
         @Override
