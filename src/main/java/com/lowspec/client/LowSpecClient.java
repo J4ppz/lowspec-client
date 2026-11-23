@@ -764,7 +764,7 @@ public class LowSpecClient implements ClientModInitializer {
         private final float[] on = new float[MODS.length];
         private final float[] hover = new float[MODS.length];
         private final float[] dotHover = new float[MODS.length];
-        private float doneHover;
+        private float doneHover, friendsHover;
         private long openNs, lastNs;
         private int px, py, pw, ph, cw, ch, rowH, rows, doneY;
 
@@ -816,8 +816,14 @@ public class LowSpecClient implements ClientModInitializer {
                     Settings.save();
                 }).bounds(cellX(i), cellY(i), w, ch).build());
             }
+
+            // bottom row: [Friends] [Done]
+            int halfW = (pw - 24 - 8) / 2;
+            this.addRenderableWidget(Button.builder(Component.empty(),
+                    b -> Minecraft.getInstance().setScreenAndShow(new Friends.FriendsScreen(new MenuScreen())))
+                    .bounds(px + 12, doneY, halfW, 24).build());
             this.addRenderableWidget(Button.builder(Component.empty(), b -> this.onClose())
-                    .bounds(px + 12, doneY, pw - 24, 24).build());
+                    .bounds(px + 12 + halfW + 8, doneY, pw - 24 - halfW - 8, 24).build());
 
             openNs = lastNs = System.nanoTime();
         }
@@ -866,11 +872,21 @@ public class LowSpecClient implements ClientModInitializer {
                 }
             }
 
-            boolean dh = Ui.in(mx, my, px + 12, doneY, pw - 24, 24);
+            int halfW = (pw - 24 - 8) / 2;
+            int doneX = px + 12 + halfW + 8;
+            int doneW = pw - 24 - halfW - 8;
+
+            boolean fh = Ui.in(mx, my, px + 12, doneY, halfW, 24);
+            friendsHover += ((fh ? 1f : 0f) - friendsHover) * k;
+            Ui.rrAA(g, px + 12, doneY + oy, halfW, 24, Ui.a(Ui.mix(0x38FFFFFF, 0x70FFFFFF, friendsHover), e));
+            Ui.text(g, f, "Friends", px + 12 + halfW / 2 - Ui.tw(f, "Friends") / 2, doneY + oy + 8,
+                    Ui.a(0xFFFFFFFF, e), false);
+
+            boolean dh = Ui.in(mx, my, doneX, doneY, doneW, 24);
             doneHover += ((dh ? 1f : 0f) - doneHover) * k;
-            Ui.rrAA(g, px + 12, doneY + oy, pw - 24, 24, Ui.a(Ui.mix(0x38FFFFFF, 0x70FFFFFF, doneHover), e));
-            int dw = Ui.tw(f, "Done");
-            Ui.text(g, f, "Done", px + pw / 2 - dw / 2, doneY + oy + 8, Ui.a(0xFFFFFFFF, e), false);
+            Ui.rrAA(g, doneX, doneY + oy, doneW, 24, Ui.a(Ui.mix(0x38FFFFFF, 0x70FFFFFF, doneHover), e));
+            Ui.text(g, f, "Done", doneX + doneW / 2 - Ui.tw(f, "Done") / 2, doneY + oy + 8,
+                    Ui.a(0xFFFFFFFF, e), false);
         }
     }
 
