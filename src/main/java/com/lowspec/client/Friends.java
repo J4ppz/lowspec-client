@@ -103,7 +103,7 @@ public final class Friends {
             if (beatSent) bye(true);
         }));
 
-        ScreenEvents.AFTER_INIT.register((client, screen, width, height) -> {
+                ScreenEvents.AFTER_INIT.register((client, screen, width, height) -> {
             if (screen instanceof TitleScreen) {
                 Screens.getButtons(screen).add(Button.builder(Component.literal("Friends"),
                         b -> client.setScreenAndShow(new FriendsScreen(screen)))
