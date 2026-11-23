@@ -31,8 +31,6 @@ import com.mojang.blaze3d.platform.InputConstants;
 
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
-import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
-import net.fabricmc.fabric.api.client.screen.v1.Screens;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
@@ -40,7 +38,6 @@ import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
@@ -102,14 +99,6 @@ public final class Friends {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (beatSent) bye(true);
         }));
-
-                ScreenEvents.AFTER_INIT.register((client, screen, width, height) -> {
-            if (screen instanceof TitleScreen) {
-                Screens.getButtons(screen).add(Button.builder(Component.literal("Friends"),
-                        b -> client.setScreenAndShow(new FriendsScreen(screen)))
-                        .bounds(6, 6, 70, 20).build());
-            }
-        });
     }
 
     // ---------- presence loop ----------
