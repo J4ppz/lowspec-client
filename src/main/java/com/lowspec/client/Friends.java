@@ -1,6 +1,7 @@
 package com.lowspec.client;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -14,12 +15,13 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 import com.google.gson.JsonElement;
@@ -38,31 +40,40 @@ import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.input.KeyEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
 /** Friends + presence + "other LowSpec players" logo. Talks to your own Cloudflare Worker. */
 public final class Friends {
 
-    // ===== SET THESE after you deploy the Worker (everyone who uses your jar shares them) =====
-    static final String BACKEND = "https://lowspec.japzsir.workers.dev";           // e.g. "https://lowspec.yourname.workers.dev"
-    static final String KEY = "poop-tiki67";      // the same text as the KEY variable in Cloudflare
-    // ==========================================================================================
+    // Defaults. You can ALSO set these without rebuilding, in config/lowspec-friends.properties
+    // (lines "backend=" and "key="). Everyone must use the same backend and key.
+    static final String DEFAULT_BACKEND = "https://lowspec.japzsir.workers.dev/";           // e.g. "https://lowspec.yourname.workers.dev"
+    static final String DEFAULT_KEY = "poop-tiki67";      // same text as the KEY variable in Cloudflare
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5)).build();
     private static final Path FILE =
             FabricLoader.getInstance().getConfigDir().resolve("lowspec-friends.properties");
 
+    static String backend = DEFAULT_BACKEND;
+    static String key = DEFAULT_KEY;
     static String myCode = "";
     static boolean invisible;
-    static final LinkedHashMap<String, String> friends = new LinkedHashMap<>();
+    static String crackedMode = "auto"; // auto / true / false
+    private static Boolean crackedCache;
+
+    static final ConcurrentHashMap<String, String> friends = new ConcurrentHashMap<>();   // code -> last name
+    static final Set<String> crackedFriends = ConcurrentHashMap.newKeySet();
 
     // Live data. Written by HTTP threads as whole immutable snapshots, read on the game thread.
-    static volatile Map<String, String[]> status = Map.of();   // friend code -> {name, server}
-    static volatile List<String[]> nearby = List.of();          // {code, name}
+    static volatile Map<String, String[]> status = Map.of();   // friend code -> {name, server, cracked}
+    static volatile List<String[]> nearby = List.of();          // {code, name, cracked}
     static volatile Set<String> modNames = Set.of();            // lowercase names of LowSpec users here
     static volatile int version;
+    static volatile String message = "";
+    static volatile long messageUntil;
 
     private static KeyMapping friendsKey;
     private static int tickCount;
@@ -73,7 +84,12 @@ public final class Friends {
     private Friends() { }
 
     static boolean enabled() {
-        return !BACKEND.isEmpty();
+        return !backend.isEmpty();
+    }
+
+    static void say(String s) {
+        message = s;
+        messageUntil = System.currentTimeMillis() + 7000;
     }
 
     // ---------- used by the name tag mixin ----------
@@ -99,6 +115,38 @@ public final class Friends {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (beatSent) bye(true);
         }));
+    }
+
+    // ---------- cracked (offline-mode) detection ----------
+    static boolean isMyAccountCracked(Minecraft mc) {
+        if (crackedMode.equals("true")) return true;
+        if (crackedMode.equals("false")) return false;
+        if (crackedCache == null) crackedCache = detectCracked(mc);
+        return crackedCache;
+    }
+
+    private static boolean detectCracked(Minecraft mc) {
+        try {
+            Object user = mc.getUser();
+            String name = mc.getUser().getName();
+            for (Method m : user.getClass().getMethods()) {
+                if (m.getParameterCount() != 0) continue;
+                if (m.getReturnType() == UUID.class) {
+                    UUID id = (UUID) m.invoke(user);
+                    if (id != null) {
+                        UUID offline = UUID.nameUUIDFromBytes(
+                                ("OfflinePlayer:" + name).getBytes(StandardCharsets.UTF_8));
+                        if (id.equals(offline) || id.version() == 3) return true;
+                    }
+                }
+                if (m.getReturnType() == String.class && m.getName().equals("getAccessToken")) {
+                    String tok = (String) m.invoke(user);
+                    if (tok == null || tok.length() < 20) return true;
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+        }
+        return false;
     }
 
     // ---------- presence loop ----------
@@ -174,11 +222,57 @@ public final class Friends {
         return t.endsWith(":25565") ? t.substring(0, t.length() - 6) : t;
     }
 
+    // ---------- adding friends ----------
+    static void addByCode(String raw) {
+        String code = raw.trim().toLowerCase(Locale.ROOT);
+        if (!code.matches("[a-z0-9]{12}")) {
+            say("An ID is exactly 12 letters/numbers");
+            return;
+        }
+        if (code.equals(myCode)) {
+            say("That's your own ID");
+            return;
+        }
+        friends.putIfAbsent(code, code);
+        save();
+        version++;
+        say("Added by ID. They show here once they're online");
+        refreshNow();
+    }
+
+    /** Looks the name up among players who are online with LowSpec; falls back to treating it as an ID. */
+    static void addByName(String raw) {
+        String t = raw.trim().toLowerCase(Locale.ROOT);
+        if (t.isEmpty()) return;
+        say("Searching...");
+        get("/find?name=" + enc(t), o -> {
+            for (JsonElement e : o.getAsJsonArray("users")) {
+                JsonObject u = e.getAsJsonObject();
+                String code = u.get("code").getAsString();
+                if (code.equals(myCode)) continue;
+                String name = u.get("name").getAsString();
+                friends.put(code, name);
+                if (u.has("cracked") && u.get("cracked").getAsBoolean()) crackedFriends.add(code);
+                else crackedFriends.remove(code);
+                save();
+                version++;
+                say("Added " + name);
+                return;
+            }
+            if (t.matches("[a-z0-9]{12}")) addByCode(t);
+            else say("Nobody called \"" + t + "\" is online with LowSpec. Use their ID instead");
+        }, () -> say("Can't reach the friends server. Check backend and key"));
+    }
+
     // ---------- network ----------
+    private static String enc(String s) {
+        return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
     private static HttpRequest.Builder req(String path) {
-        return HttpRequest.newBuilder(URI.create(BACKEND + path))
+        return HttpRequest.newBuilder(URI.create(backend + path))
                 .timeout(Duration.ofSeconds(8))
-                .header("x-key", KEY)
+                .header("x-key", key)
                 .header("content-type", "application/json");
     }
 
@@ -190,17 +284,26 @@ public final class Friends {
         }
     }
 
-    private static void get(String path, Consumer<JsonObject> then) {
+    private static void get(String path, Consumer<JsonObject> then, Runnable fail) {
         try {
             HTTP.sendAsync(req(path).GET().build(), HttpResponse.BodyHandlers.ofString())
                     .thenAccept(r -> {
-                        if (r.statusCode() != 200) return;
+                        if (r.statusCode() != 200) {
+                            if (fail != null) fail.run();
+                            return;
+                        }
                         try {
                             then.accept(JsonParser.parseString(r.body()).getAsJsonObject());
                         } catch (RuntimeException ignored) {
+                            if (fail != null) fail.run();
                         }
+                    })
+                    .exceptionally(ex -> {
+                        if (fail != null) fail.run();
+                        return null;
                     });
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException e) {
+            if (fail != null) fail.run();
         }
     }
 
@@ -209,6 +312,7 @@ public final class Friends {
         o.addProperty("code", myCode);
         o.addProperty("name", mc.getUser().getName());
         o.addProperty("server", server);
+        o.addProperty("cracked", isMyAccountCracked(mc));
         post("/beat", o);
     }
 
@@ -227,8 +331,12 @@ public final class Friends {
         }
     }
 
+    private static boolean flag(JsonObject u) {
+        return u.has("cracked") && u.get("cracked").getAsBoolean();
+    }
+
     private static void pollOnline(String server) {
-        get("/online?server=" + URLEncoder.encode(server, StandardCharsets.UTF_8), o -> {
+        get("/online?server=" + enc(server), o -> {
             List<String[]> list = new ArrayList<>();
             Set<String> names = new HashSet<>();
             for (JsonElement e : o.getAsJsonArray("users")) {
@@ -236,26 +344,40 @@ public final class Friends {
                 String code = u.get("code").getAsString();
                 String name = u.get("name").getAsString();
                 if (code.equals(myCode)) continue;
-                list.add(new String[]{code, name});
+                list.add(new String[]{code, name, flag(u) ? "1" : "0"});
                 names.add(name.toLowerCase(Locale.ROOT));
             }
             nearby = list;
             modNames = names;
             version++;
-        });
+        }, null);
     }
 
     private static void pollStatus() {
         String codes = String.join(",", friends.keySet());
-        get("/status?codes=" + URLEncoder.encode(codes, StandardCharsets.UTF_8), o -> {
+        get("/status?codes=" + enc(codes), o -> {
             Map<String, String[]> m = new HashMap<>();
+            boolean changed = false;
             for (var en : o.getAsJsonObject("status").entrySet()) {
                 JsonObject u = en.getValue().getAsJsonObject();
-                m.put(en.getKey(), new String[]{u.get("name").getAsString(), u.get("server").getAsString()});
+                String code = en.getKey();
+                String name = u.get("name").getAsString();
+                boolean cr = flag(u);
+                m.put(code, new String[]{name, u.get("server").getAsString(), cr ? "1" : "0"});
+                if (!name.equals(friends.get(code))) {
+                    friends.put(code, name);
+                    changed = true;
+                }
+                if (cr != crackedFriends.contains(code)) {
+                    if (cr) crackedFriends.add(code);
+                    else crackedFriends.remove(code);
+                    changed = true;
+                }
             }
             status = m;
+            if (changed) save();
             version++;
-        });
+        }, null);
     }
 
     // ---------- storage ----------
@@ -269,22 +391,35 @@ public final class Friends {
             }
         } catch (IOException ignored) {
         }
+        String b = p.getProperty("backend", "").trim();
+        if (!b.isEmpty()) backend = b.endsWith("/") ? b.substring(0, b.length() - 1) : b;
+        String k = p.getProperty("key", "").trim();
+        if (!k.isEmpty()) key = k;
+        crackedMode = p.getProperty("cracked", "auto").trim().toLowerCase(Locale.ROOT);
+
         myCode = p.getProperty("me", "");
         if (!myCode.matches("[a-z0-9]{8,16}")) myCode = newCode();
         invisible = Boolean.parseBoolean(p.getProperty("invisible", "false"));
-        for (String k : p.stringPropertyNames()) {
-            if (k.startsWith("friend.")) friends.put(k.substring(7), p.getProperty(k, ""));
+        for (String name : p.stringPropertyNames()) {
+            if (name.startsWith("friend.")) friends.put(name.substring(7), p.getProperty(name, ""));
+            if (name.startsWith("friendc.") && Boolean.parseBoolean(p.getProperty(name))) {
+                crackedFriends.add(name.substring(8));
+            }
         }
         save();
     }
 
     static void save() {
         Properties p = new Properties();
+        p.setProperty("backend", backend);
+        p.setProperty("key", key);
+        p.setProperty("cracked", crackedMode);
         p.setProperty("me", myCode);
         p.setProperty("invisible", Boolean.toString(invisible));
         for (var e : friends.entrySet()) p.setProperty("friend." + e.getKey(), e.getValue());
+        for (String c : crackedFriends) p.setProperty("friendc." + c, "true");
         try (var out = Files.newOutputStream(FILE)) {
-            p.store(out, "LowSpec friends");
+            p.store(out, "LowSpec friends - backend/key: your Cloudflare Worker address and secret word");
         } catch (IOException ignored) {
         }
     }
@@ -317,14 +452,17 @@ public final class Friends {
     // ---------- Friends screen ----------
     static final class FriendsScreen extends Screen {
         private static final int ROW = 24;
+        private static final int TAG = 0xFFFFB86B;
         private final Screen parent;
+        private final StringBuilder input = new StringBuilder();
         private int seen = -1;
         private long openNs, lastNs, lastRefresh;
-        private int px, py, pw, ph, rowsF, rowsN, fY, nY, backY, half;
-        private float invHover, backHover;
+        private int px, py, pw, ph, rowsF, rowsN, fY, nY, addLabelY, inputY, hintY, backY, half, inputW;
+        private float invHover, backHover, addHover;
         private final float[] rowHover = new float[16];
         private List<String> order = List.of();
         private List<String[]> near = List.of();
+        private boolean myCracked;
 
         FriendsScreen(Screen parent) {
             super(Component.literal("Friends"));
@@ -335,26 +473,37 @@ public final class Friends {
         protected void init() {
             order = sortedFriends();
             near = nearby;
+            myCracked = isMyAccountCracked(Minecraft.getInstance());
 
-            int slots = Math.max(2, (this.height - 8 - 160) / ROW);
-            rowsF = Math.max(1, Math.min(Math.min(7, order.size() == 0 ? 1 : order.size()), slots - 1));
-            rowsN = Math.max(1, Math.min(Math.min(5, near.size() == 0 ? 1 : near.size()), slots - rowsF));
+            int slots = Math.max(2, (this.height - 8 - 190) / ROW);
+            rowsF = Math.max(1, Math.min(order.isEmpty() ? 1 : order.size(), slots - 1));
+            rowsN = Math.max(1, Math.min(near.isEmpty() ? 1 : near.size(), Math.min(4, slots - rowsF)));
 
             pw = Math.min(440, this.width - 16);
             half = (pw - 24 - 8) / 2;
-            int top = 50;
-            ph = top + 14 + rowsF * ROW + 8 + 14 + rowsN * ROW + 8 + 24 + 14;
+            int fYr = 64;
+            int nYr = fYr + rowsF * ROW + 20;
+            int addLabelR = nYr + rowsN * ROW + 6;
+            int inputYr = addLabelR + 14;
+            int hintYr = inputYr + 25;
+            int backYr = hintYr + 15;
+            ph = backYr + 36;
             px = (this.width - pw) / 2;
             py = Math.max(4, (this.height - ph) / 2);
-            fY = py + top + 14;
-            nY = fY + rowsF * ROW + 8 + 14;
-            backY = nY + rowsN * ROW + 8;
+            fY = py + fYr;
+            nY = py + nYr;
+            addLabelY = py + addLabelR;
+            inputY = py + inputYr;
+            hintY = py + hintYr;
+            backY = py + backYr;
+            inputW = pw - 24 - 8 - 60;
 
             // Invisible click targets. Drawing is custom in extractRenderState.
             for (int i = 0; i < rowsF && i < order.size(); i++) {
                 String code = order.get(i);
                 this.addRenderableWidget(Button.builder(Component.empty(), b -> {
                     friends.remove(code);
+                    crackedFriends.remove(code);
                     save();
                     version++;
                 }).bounds(px + pw - 12 - 22, fY + i * ROW, 22, 22).build());
@@ -364,19 +513,59 @@ public final class Friends {
                 if (friends.containsKey(u[0])) continue;
                 this.addRenderableWidget(Button.builder(Component.empty(), b -> {
                     friends.put(u[0], u[1]);
+                    if (u[2].equals("1")) crackedFriends.add(u[0]);
                     save();
                     refreshNow();
                     version++;
                 }).bounds(px + pw - 12 - 50, nY + j * ROW, 50, 22).build());
             }
-            this.addRenderableWidget(Button.builder(Component.empty(), b -> {
-                toggleInvisible();
-            }).bounds(px + 12, backY, half, 24).build());
+            this.addRenderableWidget(Button.builder(Component.empty(), b -> submit())
+                    .bounds(px + pw - 12 - 60, inputY, 60, 22).build());
+            this.addRenderableWidget(Button.builder(Component.empty(), b -> toggleInvisible())
+                    .bounds(px + 12, backY, half, 24).build());
             this.addRenderableWidget(Button.builder(Component.empty(), b -> this.onClose())
                     .bounds(px + 12 + half + 8, backY, pw - 24 - half - 8, 24).build());
 
             if (openNs == 0) openNs = lastNs = System.nanoTime();
             seen = version;
+        }
+
+        private void submit() {
+            String t = input.toString().trim();
+            if (t.isEmpty()) return;
+            if (!enabled()) {
+                say("Not set up yet - put your Worker address in backend= in lowspec-friends.properties");
+                return;
+            }
+            addByName(t);
+            input.setLength(0);
+        }
+
+        private static char keyChar(int k) {
+            if (k >= 65 && k <= 90) return (char) ('a' + (k - 65));
+            if (k >= 48 && k <= 57) return (char) ('0' + (k - 48));
+            if (k >= 320 && k <= 329) return (char) ('0' + (k - 320));
+            if (k == 45) return '_';
+            return 0;
+        }
+
+        @Override
+        public boolean keyPressed(KeyEvent event) {
+            int k = event.key();
+            if (k == 259) { // backspace
+                if (input.length() > 0) input.setLength(input.length() - 1);
+                return true;
+            }
+            if (k == 257 || k == 335) { // enter
+                submit();
+                return true;
+            }
+            char c = keyChar(k);
+            if (c != 0) {
+                if (input.length() < 16) input.append(c);
+                return true;
+            }
+            return super.keyPressed(event);
         }
 
         @Override
@@ -413,13 +602,16 @@ public final class Friends {
             int white = Ui.a(0xFFFFFFFF, e);
             int grey = Ui.a(0xFF9AA4C0, e);
             int mint = Ui.a(0xFF55FFAA, e);
+            int tag = Ui.a(TAG, e);
 
             g.fill(0, 0, this.width, this.height, Ui.a(0x78000000, e));
             Ui.bigPanel(g, px, py + oy, pw, ph, e);
 
             Logo.draw(g, px + 14, py + oy + 12, 2, e);
             Ui.text(g, f, "Friends", px + 14 + 32, py + oy + 14, white, false);
-            String sub = enabled() ? "Your ID: " + myCode : "Not set up yet - fill in BACKEND in Friends.java";
+            String sub = enabled()
+                    ? "Your ID: " + myCode + (myCracked ? "  (cracked account)" : "")
+                    : "Not set up yet - see backend= in lowspec-friends.properties";
             Ui.text(g, f, fit(f, sub, pw - 70), px + 14 + 32, py + oy + 27, grey, false);
 
             Ui.text(g, f, "Your friends", px + 14, fY - 12 + oy, grey, false);
@@ -434,10 +626,18 @@ public final class Friends {
                     String[] st = status.get(code);
                     boolean online = st != null;
                     Ui.rr(g, px + 22, ry + oy + 8, 6, 6, Ui.a(online ? 0xFF55FF55 : 0xFF6B7280, e));
-                    Ui.text(g, f, fit(f, displayName(code), pw / 3), px + 34, ry + oy + 7, white, false);
+
+                    String nm = fit(f, displayName(code), pw / 4);
+                    Ui.text(g, f, nm, px + 34, ry + oy + 7, white, false);
+                    int after = px + 34 + Ui.tw(f, nm);
+                    if (crackedFriends.contains(code)) {
+                        Ui.text(g, f, " (cracked)", after, ry + oy + 7, tag, false);
+                        after += Ui.tw(f, " (cracked)");
+                    }
 
                     String right = !online ? "Offline" : (st[1].isEmpty() ? "Online" : st[1]);
-                    right = fit(f, right, pw / 2 - 50);
+                    int maxRight = px + pw - 12 - 22 - 8 - (after + 10);
+                    right = fit(f, right, Math.max(30, maxRight));
                     Ui.text(g, f, right, px + pw - 12 - 22 - 8 - Ui.tw(f, right), ry + oy + 7,
                             online ? mint : grey, false);
 
@@ -446,7 +646,7 @@ public final class Friends {
                             Ui.in(mx, my, bx, ry, 22, 22) ? 1f : 0f), e));
                     Ui.text(g, f, "x", bx + 11 - Ui.tw(f, "x") / 2, ry + oy + 7, white, false);
                 } else if (i == 0) {
-                    Ui.text(g, f, "No friends yet - add someone from the list below", px + 22, ry + oy + 7, grey, false);
+                    Ui.text(g, f, "No friends yet - type a name or ID below", px + 22, ry + oy + 7, grey, false);
                 }
             }
 
@@ -459,7 +659,11 @@ public final class Friends {
 
                 if (j < near.size()) {
                     String[] u = near.get(j);
-                    Ui.text(g, f, fit(f, u[1], pw / 2), px + 22, ry + oy + 7, white, false);
+                    String nm = fit(f, u[1], pw / 3);
+                    Ui.text(g, f, nm, px + 22, ry + oy + 7, white, false);
+                    if (u[2].equals("1")) {
+                        Ui.text(g, f, " (cracked)", px + 22 + Ui.tw(f, nm), ry + oy + 7, tag, false);
+                    }
                     int bx = px + pw - 12 - 50;
                     if (friends.containsKey(u[0])) {
                         Ui.text(g, f, "Friend", bx + 25 - Ui.tw(f, "Friend") / 2, ry + oy + 7, grey, false);
@@ -472,6 +676,29 @@ public final class Friends {
                     Ui.text(g, f, "Nobody here yet (join a multiplayer server)", px + 22, ry + oy + 7, grey, false);
                 }
             }
+
+            // ----- add a friend: text box + button -----
+            Ui.text(g, f, "Add a friend", px + 14, addLabelY + oy, grey, false);
+            Ui.rr(g, px + 11, inputY + oy - 1, inputW + 2, 24, Ui.a(0x8855FFAA, e));
+            Ui.rr(g, px + 12, inputY + oy, inputW, 22, Ui.a(0xFF0A0F1A, e));
+            boolean caret = (System.nanoTime() / 500_000_000L) % 2 == 0;
+            if (input.length() == 0) {
+                Ui.text(g, f, caret ? "|" : " ", px + 18, inputY + oy + 7, mint, false);
+                Ui.text(g, f, "player name or 12-letter ID", px + 24, inputY + oy + 7,
+                        Ui.a(0xFF566074, e), false);
+            } else {
+                String shown = input.toString() + (caret ? "|" : "");
+                Ui.text(g, f, shown, px + 18, inputY + oy + 7, white, false);
+            }
+            boolean ah = Ui.in(mx, my, px + pw - 12 - 60, inputY, 60, 22);
+            addHover += ((ah ? 1f : 0f) - addHover) * k;
+            Ui.rr(g, px + pw - 12 - 60, inputY + oy, 60, 22,
+                    Ui.a(Ui.mix(0x7755FFAA, 0xCC55FFAA, addHover), e));
+            Ui.text(g, f, "Add", px + pw - 12 - 30 - Ui.tw(f, "Add") / 2, inputY + oy + 7, white, false);
+
+            boolean msgOn = nowMs < messageUntil && !message.isEmpty();
+            String hint = msgOn ? message : "Press Enter to add. Names must be online with LowSpec; IDs work any time";
+            Ui.text(g, f, fit(f, hint, pw - 28), px + 14, hintY + oy, msgOn ? mint : grey, false);
 
             boolean ih = Ui.in(mx, my, px + 12, backY, half, 24);
             invHover += ((ih ? 1f : 0f) - invHover) * k;
