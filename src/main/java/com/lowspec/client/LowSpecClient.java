@@ -2,6 +2,7 @@ package com.lowspec.client;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -19,6 +20,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.loader.api.FabricLoader;
+import net.fabricmc.loader.api.ModContainer;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
@@ -78,6 +80,7 @@ public class LowSpecClient implements ClientModInitializer {
     public void onInitializeClient() {
         Settings.load();
         Friends.init();
+        if (Settings.has(Mod.SHIELD)) registerShieldPack();
 
         KeyMapping.Category category = KeyMapping.Category.register(
                 Identifier.fromNamespaceAndPath("lowspec", "main"));
@@ -111,6 +114,35 @@ public class LowSpecClient implements ClientModInitializer {
                 ScreenEvents.afterExtract(screen).register(Marks::corner);
             }
         });
+    }
+
+    /**
+     * Registers the optional "full shield banners" resource pack that the build generates.
+     * Done through reflection so a different Fabric API name can never break the build:
+     * if neither known API is found, the pack just isn't added.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void registerShieldPack() {
+        Identifier id = Identifier.fromNamespaceAndPath("lowspec", "full_shield_banners");
+        Object container = FabricLoader.getInstance().getModContainer("lowspec").orElse(null);
+        if (container == null) return;
+        String[][] tries = {
+                {"net.fabricmc.fabric.api.resource.v1.ResourceLoader", "registerBuiltinPack",
+                        "net.fabricmc.fabric.api.resource.v1.pack.PackActivationType"},
+                {"net.fabricmc.fabric.api.resource.ResourceManagerHelper", "registerBuiltinResourcePack",
+                        "net.fabricmc.fabric.api.resource.ResourcePackActivationType"},
+        };
+        for (String[] t : tries) {
+            try {
+                Class<?> owner = Class.forName(t[0]);
+                Class<?> typeCls = Class.forName(t[2]);
+                Object type = Enum.valueOf((Class) typeCls, "DEFAULT_ENABLED");
+                Method m = owner.getMethod(t[1], Identifier.class, ModContainer.class, typeCls);
+                m.invoke(null, id, container, type);
+                return;
+            } catch (ReflectiveOperationException | RuntimeException ignored) {
+            }
+        }
     }
 
     private static void rebindZoom(int code) {
@@ -286,6 +318,7 @@ public class LowSpecClient implements ClientModInitializer {
         ZOOM("Zoom", true, O.ZOOM_KEY, O.ZOOM_FOV, O.ZOOM_SMOOTH),
         NAMETAG("Name tag + logo", true, O.NT_SELF, O.NT_LOGO),
         FONT("Smooth font", false),
+        SHIELD("Shield banners", true),
         PERF("Performance mode", false, O.PERF_ONE, O.PERF_RD, O.PERF_SIM, O.PERF_SHADOWS, O.PERF_ENT, O.PERF_BLEND),
         TWEAKS("FPS tweaks", false, O.TW_PART, O.TW_CLOUDS, O.TW_GFX, O.TW_BLUR, O.TW_WEATHER, O.TW_VSYNC),
         DYNRD("Dynamic distance", false, O.DYN_TARGET, O.DYN_MIN, O.DYN_MAX);
