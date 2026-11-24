@@ -13,11 +13,14 @@ jobs:
           mkdir -p src/main/resources/assets/lowspec/font
           curl -fsSL -o src/main/resources/assets/lowspec/font/poppins.ttf \
             https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Medium.ttf
-      - name: Generate art (panorama, buttons, logo)
+      - name: Generate art (panorama, buttons, logo, shields)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install --quiet numpy
+          /tmp/venv/bin/pip install --quiet numpy pillow
           /tmp/venv/bin/python tools/gen_assets.py
+          /tmp/venv/bin/python tools/gen_shields.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
