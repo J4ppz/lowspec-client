@@ -8,7 +8,10 @@
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
-    "client": ["com.lowspec.client.LowSpecClient"]
+    "client": [
+      "com.lowspec.client.LowSpecClient",
+      "com.lowspec.client.ShieldSync"
+    ]
   },
   "mixins": [
     { "config": "lowspec.mixins.json", "environment": "client" }
