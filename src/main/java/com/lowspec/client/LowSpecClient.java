@@ -80,7 +80,7 @@ public class LowSpecClient implements ClientModInitializer {
     public void onInitializeClient() {
         Settings.load();
         Friends.init();
-        if (Settings.has(Mod.SHIELD)) registerShieldPack();
+        registerShieldPack();
 
         KeyMapping.Category category = KeyMapping.Category.register(
                 Identifier.fromNamespaceAndPath("lowspec", "main"));
