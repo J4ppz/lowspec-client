@@ -49,7 +49,7 @@ public final class Friends {
 
     // Defaults. You can ALSO set these without rebuilding, in config/lowspec-friends.properties
     // (lines "backend=" and "key="). Everyone must use the same backend and key.
-    static final String DEFAULT_BACKEND = "https://lowspec.japzsir.workers.dev/";           // e.g. "https://lowspec.yourname.workers.dev"
+    static final String DEFAULT_BACKEND = "https://lowspec.japzsir.workers.dev";           // e.g. "https://lowspec.yourname.workers.dev"
     static final String DEFAULT_KEY = "poop-tiki67";      // same text as the KEY variable in Cloudflare
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
