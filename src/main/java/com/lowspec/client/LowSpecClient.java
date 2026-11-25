@@ -285,7 +285,7 @@ public class LowSpecClient implements ClientModInitializer {
 
         static final Opt NT_SELF = Opt.bool("nt.self", "Own tag in third person", true);
         static final Opt NT_LOGO = Opt.bool("nt.logo", "Show logo", true);
-        static final Opt CAPE = Opt.cycle("cos.cape", "Cape", 0, "None", "Aurora", "Ember", "Ocean", "Void", "Mint", "Sunset");
+        static final Opt CAPE = Opt.cycle("cos.cape", "Cape", 0, "None", "Royal", "Midnight", "Emerald", "Leather", "Ember", "Aurora");
 
         static final Opt PERF_ONE = Opt.bool("perf.one", "1 chunk render distance", false);
         static final Opt PERF_RD = Opt.num("perf.rd", "Render distance", 6, 2, 12, 1, "");
