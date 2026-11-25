@@ -285,6 +285,7 @@ public class LowSpecClient implements ClientModInitializer {
 
         static final Opt NT_SELF = Opt.bool("nt.self", "Own tag in third person", true);
         static final Opt NT_LOGO = Opt.bool("nt.logo", "Show logo", true);
+        static final Opt CAPE = Opt.cycle("cos.cape", "Cape", 0, "None", "Aurora", "Ember", "Ocean", "Void", "Mint", "Sunset");
 
         static final Opt PERF_ONE = Opt.bool("perf.one", "1 chunk render distance", false);
         static final Opt PERF_RD = Opt.num("perf.rd", "Render distance", 6, 2, 12, 1, "");
@@ -317,6 +318,7 @@ public class LowSpecClient implements ClientModInitializer {
         SPRINT("Toggle sprint", false, O.SPRINT_ITEM),
         ZOOM("Zoom", true, O.ZOOM_KEY, O.ZOOM_FOV, O.ZOOM_SMOOTH),
         NAMETAG("Name tag + logo", true, O.NT_SELF, O.NT_LOGO),
+        COSMETICS("Cosmetics", true, O.CAPE),
         FONT("Smooth font", false),
         SHIELD("Shield banners", true),
         PERF("Performance mode", false, O.PERF_ONE, O.PERF_RD, O.PERF_SIM, O.PERF_SHADOWS, O.PERF_ENT, O.PERF_BLEND),
