@@ -6,7 +6,8 @@
   "client": [
     "ShowSelfNameMixin",
     "NameTagLogoMixin",
-    "OptionsMixin"
+    "OptionsMixin",
+    "SkinCapeMixin"
   ],
   "injectors": {
     "defaultRequire": 0
