@@ -10,7 +10,8 @@
   "entrypoints": {
     "client": [
       "com.lowspec.client.LowSpecClient",
-      "com.lowspec.client.ShieldSync"
+      "com.lowspec.client.ShieldSync",
+      "com.lowspec.client.Cosmetics"
     ]
   },
   "mixins": [
